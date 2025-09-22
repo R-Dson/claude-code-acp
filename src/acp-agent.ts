@@ -103,32 +103,38 @@ export class OpenCodeAcpAgent implements Agent {
     console.error(`[setupEventHandlers] Event stream started.`);
     for await (const event of events.stream) {
       console.error(`[setupEventHandlers] Received event: ${event.type}`);
-      if (event.type === 'message.part.updated') {
+      if (event.type === "message.part.updated") {
         const partUpdatedEvent = event as EventMessagePartUpdated; // Explicitly cast the event
         const { part } = partUpdatedEvent.properties; // Get the part object
         const sessionID = part.sessionID; // Extract sessionID from the part object
-        
-        console.error(`[setupEventHandlers] Processing message.part.updated for sessionID: ${sessionID}, partID: ${part.id}, type: ${part.type}`);
+
+        console.error(
+          `[setupEventHandlers] Processing message.part.updated for sessionID: ${sessionID}, partID: ${part.id}, type: ${part.type}`,
+        );
 
         // Simplified echo filter: if part.type is 'text' and has no 'time' property, it's an echo of user input.
-        if (part.type === 'text' && !part.time) {
-            console.error(`[ECHO FILTER]: Dropping echo of user input (text part with no timestamp) for sessionID: ${sessionID}, partID: ${part.id}`);
-            continue; // Skip this echo
+        if (part.type === "text" && !part.time) {
+          console.error(
+            `[ECHO FILTER]: Dropping echo of user input (text part with no timestamp) for sessionID: ${sessionID}, partID: ${part.id}`,
+          );
+          continue; // Skip this echo
         }
 
         if (!sessionID || !part) {
-          console.warn(`[Event Handler] Missing sessionID or part in message.part.updated event properties: ${JSON.stringify(partUpdatedEvent.properties)}`);
+          console.warn(
+            `[Event Handler] Missing sessionID or part in message.part.updated event properties: ${JSON.stringify(partUpdatedEvent.properties)}`,
+          );
           continue; // Skip this malformed event
         }
 
         const session = this.sessions[sessionID];
         if (session) {
           // Implement Delta Calculation for Text Parts
-          if (part.type === 'text') {
+          if (part.type === "text") {
             const currentText = part.text;
-            const previousText = session.lastSentTextByMessagePartId.get(part.id) || '';
+            const previousText = session.lastSentTextByMessagePartId.get(part.id) || "";
             const deltaText = currentText.substring(previousText.length);
-            
+
             session.lastSentTextByMessagePartId.set(part.id, currentText);
 
             if (deltaText.length > 0) {
@@ -136,38 +142,48 @@ export class OpenCodeAcpAgent implements Agent {
                 sessionId: sessionID,
                 update: {
                   sessionUpdate: "agent_message_chunk",
-                  content: { type: "text", text: deltaText }
-                }
+                  content: { type: "text", text: deltaText },
+                },
               });
-              console.error(`[setupEventHandlers] Sent agent_message_chunk delta for part ${part.id}`);
+              console.error(
+                `[setupEventHandlers] Sent agent_message_chunk delta for part ${part.id}`,
+              );
             }
             continue; // Skip further processing for this text part, as its delta has been handled.
           }
 
           // Implement Delta Calculation for Reasoning Parts
-          if (part.type === 'reasoning') {
+          if (part.type === "reasoning") {
             const currentText = part.text;
-            const previousText = session.lastSentTextByMessagePartId.get(part.id) || '';
+            const previousText = session.lastSentTextByMessagePartId.get(part.id) || "";
             const deltaText = currentText.substring(previousText.length);
             session.lastSentTextByMessagePartId.set(part.id, currentText);
 
             if (deltaText.length > 0) {
               await this.client.sessionUpdate({
                 sessionId: sessionID,
-                update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: deltaText } }
+                update: {
+                  sessionUpdate: "agent_thought_chunk",
+                  content: { type: "text", text: deltaText },
+                },
               });
-              console.error(`[setupEventHandlers] Sent agent_thought_chunk delta for part ${part.id}`);
+              console.error(
+                `[setupEventHandlers] Sent agent_thought_chunk delta for part ${part.id}`,
+              );
             }
             continue; // Skip further processing for this reasoning part, as its delta has been handled.
           }
 
           // Handle tool parts with permission requests
-          if (part.type === 'tool' && part.state.status === 'pending') {
+          if (part.type === "tool" && part.state.status === "pending") {
             const { callID, tool } = part;
             const toolDescription = `Allow agent to run tool: ${tool}?`;
-            
+
             let permissionGranted = false;
-            if (session.permissionMode === "bypassPermissions" || session.permissionMode === "acceptEdits") {
+            if (
+              session.permissionMode === "bypassPermissions" ||
+              session.permissionMode === "acceptEdits"
+            ) {
               permissionGranted = true;
             } else if (session.permissionMode === "plan") {
               await this.client.sessionUpdate({
@@ -176,11 +192,17 @@ export class OpenCodeAcpAgent implements Agent {
                   sessionUpdate: "tool_call_update",
                   toolCallId: callID,
                   status: ToolCallStatus.Failed,
-                  content: [{ type: "content", content: { type: "text", text: `Tool execution blocked in Plan Mode.` } }],
+                  content: [
+                    {
+                      type: "content",
+                      content: { type: "text", text: `Tool execution blocked in Plan Mode.` },
+                    },
+                  ],
                 },
               });
               continue; // Skip further processing for this tool
-            } else { // "default" mode - Always Ask
+            } else {
+              // "default" mode - Always Ask
               await this.client.sessionUpdate({
                 sessionId: sessionID,
                 update: {
@@ -204,14 +226,22 @@ export class OpenCodeAcpAgent implements Agent {
                 ],
               });
 
-              if (permissionResponse.outcome.outcome !== "selected" || permissionResponse.outcome.optionId !== "allow_once") {
+              if (
+                permissionResponse.outcome.outcome !== "selected" ||
+                permissionResponse.outcome.optionId !== "allow_once"
+              ) {
                 await this.client.sessionUpdate({
                   sessionId: sessionID,
                   update: {
                     sessionUpdate: "tool_call_update",
                     toolCallId: callID,
                     status: ToolCallStatus.Failed,
-                    content: [{ type: "content", content: { type: "text", text: `Permission for tool '${tool}' denied.` } }],
+                    content: [
+                      {
+                        type: "content",
+                        content: { type: "text", text: `Permission for tool '${tool}' denied.` },
+                      },
+                    ],
                   },
                 });
                 continue; // Skip further processing for this tool
@@ -241,14 +271,14 @@ export class OpenCodeAcpAgent implements Agent {
           const notifications = toAcpNotifications(
             {} as AssistantMessage, // Placeholder, as full message info is not in part update
             part,
-            sessionID
+            sessionID,
           );
           for (const notification of notifications) {
             await this.client.sessionUpdate(notification);
             // console.error(`[setupEventHandlers] Sent notification for part ${part.id}, type: ${part.type}`); // Removed to prevent parsing errors
           }
         }
-      } else if (event.type === 'message.updated') {
+      } else if (event.type === "message.updated") {
         const messageUpdatedEvent = event as EventMessageUpdated;
         const { info: messageInfo } = messageUpdatedEvent.properties;
         const session = this.sessions[messageInfo.sessionID];
@@ -287,7 +317,7 @@ export class OpenCodeAcpAgent implements Agent {
     });
 
     if (sessionError || !sessionData) {
-      const errorDetails = sessionError ? JSON.stringify(sessionError) : 'undefined response';
+      const errorDetails = sessionError ? JSON.stringify(sessionError) : "undefined response";
       throw new Error(`Failed to create opencode session: ${errorDetails}`);
     }
     const sessionId = sessionData.id;
@@ -363,33 +393,35 @@ export class OpenCodeAcpAgent implements Agent {
     const opencodeClient = session.opencodeClient;
 
     // Convert ACP prompt to Opencode prompt parts
-    const opencodePromptParts: (TextPartInput | FilePartInput)[] = params.prompt.map((part: ContentBlock) => {
-      switch (part.type) {
-        case "text":
-          return { type: "text", text: part.text };
-        case "resource_link":
-          return { type: "text", text: `Resource Link: ${part.uri} (${part.name})` };
-        case "resource":
-          if ("text" in part.resource) {
-            return { type: "text", text: part.resource.text };
-          }
-          return { type: "text", text: `Binary Resource: ${part.resource.uri}` };
-        case "image":
-          return {
-            type: "file",
-            mime: part.mimeType,
-            url: part.uri || `data:${part.mimeType};base64,${part.data}`,
-          };
-        case "audio":
-          return {
-            type: "file",
-            mime: part.mimeType,
-            url: `data:${part.mimeType};base64,${part.data}`,
-          };
-        default:
-          return { type: "text", text: `Unsupported content type: ${(part as any).type}` };
-      }
-    });
+    const opencodePromptParts: (TextPartInput | FilePartInput)[] = params.prompt.map(
+      (part: ContentBlock) => {
+        switch (part.type) {
+          case "text":
+            return { type: "text", text: part.text };
+          case "resource_link":
+            return { type: "text", text: `Resource Link: ${part.uri} (${part.name})` };
+          case "resource":
+            if ("text" in part.resource) {
+              return { type: "text", text: part.resource.text };
+            }
+            return { type: "text", text: `Binary Resource: ${part.resource.uri}` };
+          case "image":
+            return {
+              type: "file",
+              mime: part.mimeType,
+              url: part.uri || `data:${part.mimeType};base64,${part.data}`,
+            };
+          case "audio":
+            return {
+              type: "file",
+              mime: part.mimeType,
+              url: `data:${part.mimeType};base64,${part.data}`,
+            };
+          default:
+            return { type: "text", text: `Unsupported content type: ${(part as any).type}` };
+        }
+      },
+    );
 
     // Send the prompt to the Opencode server
     console.error(`[prompt] Sending prompt to Opencode server for session ID: ${params.sessionId}`);
@@ -413,17 +445,19 @@ export class OpenCodeAcpAgent implements Agent {
     // Determine the stop reason based on the final message information received directly from the prompt call
     let stopReason: StopReason = "end_turn";
     if (promptData.info.error) {
-        // If there's an error in the final message info, it's either cancelled or a refusal
-        if (promptData.info.error.name === "MessageAbortedError") {
-            stopReason = "cancelled";
-        } else {
-            stopReason = "refusal";
-        }
+      // If there's an error in the final message info, it's either cancelled or a refusal
+      if (promptData.info.error.name === "MessageAbortedError") {
+        stopReason = "cancelled";
+      } else {
+        stopReason = "refusal";
+      }
     }
     // Other stop reasons like max_tokens, max_turn_requests are not directly available
     // from AssistantMessage, so default to end_turn if no error.
 
-    console.error(`[prompt] Returning stopReason: ${stopReason} for session ID: ${params.sessionId}`);
+    console.error(
+      `[prompt] Returning stopReason: ${stopReason} for session ID: ${params.sessionId}`,
+    );
     return { stopReason };
   }
 
@@ -432,7 +466,9 @@ export class OpenCodeAcpAgent implements Agent {
       throw new Error("Session not found");
     }
     this.sessions[params.sessionId].cancelled = true;
-    await this.sessions[params.sessionId].opencodeClient.session.abort({ path: { id: params.sessionId } });
+    await this.sessions[params.sessionId].opencodeClient.session.abort({
+      path: { id: params.sessionId },
+    });
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
@@ -470,7 +506,7 @@ export class OpenCodeAcpAgent implements Agent {
 //     "resume", "status", "statusline", "terminal-setup", "todos", "vim",
 //     "run", "serve", "upgrade",
 //   ];
-// 
+//
 //   try {
 //     const response = await opencodeClient.command.list();
 //     if (!response.data) {
@@ -525,21 +561,30 @@ export function toAcpNotifications(
           toolCallId: callID,
           title: state.title || tool,
           status: ToolCallStatus.InProgress,
-          content: [{ type: "content", content: { type: "text", text: `Tool input: ${JSON.stringify(state.input || {})}` } }],
+          content: [
+            {
+              type: "content",
+              content: { type: "text", text: `Tool input: ${JSON.stringify(state.input || {})}` },
+            },
+          ],
         };
       } else if (state.status === "completed") {
         update = {
           sessionUpdate: "tool_call_update",
           toolCallId: callID,
           status: ToolCallStatus.Completed,
-          content: [{ type: "content", content: { type: "text", text: JSON.stringify(state.output) } }],
+          content: [
+            { type: "content", content: { type: "text", text: JSON.stringify(state.output) } },
+          ],
         };
       } else if (state.status === "error") {
         update = {
           sessionUpdate: "tool_call_update",
           toolCallId: callID,
           status: ToolCallStatus.Failed,
-          content: [{ type: "content", content: { type: "text", text: JSON.stringify(state.error) } }],
+          content: [
+            { type: "content", content: { type: "text", text: JSON.stringify(state.error) } },
+          ],
         };
       }
       break;
@@ -550,7 +595,10 @@ export function toAcpNotifications(
         sessionUpdate: "agent_message_chunk", // Or a more specific "file" update if ACP supported it
         content: messagePart.mime.startsWith("image/")
           ? { type: "image", mimeType: messagePart.mime, uri: messagePart.url, data: "" }
-          : { type: "text", text: `File: ${messagePart.filename || messagePart.url} (${messagePart.mime})` },
+          : {
+              type: "text",
+              text: `File: ${messagePart.filename || messagePart.url} (${messagePart.mime})`,
+            },
       };
       break;
     case "reasoning":
@@ -612,11 +660,22 @@ export function toAcpNotifications(
 
 function mapToolKind(toolName: string): ToolKind {
   if (toolName.startsWith("read")) return ToolKind.Read;
-  if (toolName.startsWith("write") || toolName.startsWith("edit") || toolName.startsWith("apply") || toolName.startsWith("insert")) return ToolKind.Edit;
+  if (
+    toolName.startsWith("write") ||
+    toolName.startsWith("edit") ||
+    toolName.startsWith("apply") ||
+    toolName.startsWith("insert")
+  )
+    return ToolKind.Edit;
   if (toolName.startsWith("execute")) return ToolKind.Execute;
   if (toolName.startsWith("search") || toolName.startsWith("list")) return ToolKind.Search;
   if (toolName.startsWith("browser")) return ToolKind.Fetch;
-  if (toolName.startsWith("update") || toolName.startsWith("ask") || toolName.startsWith("new_task")) return ToolKind.Think;
+  if (
+    toolName.startsWith("update") ||
+    toolName.startsWith("ask") ||
+    toolName.startsWith("new_task")
+  )
+    return ToolKind.Think;
   if (toolName.startsWith("switch")) return ToolKind.SwitchMode;
   return ToolKind.Other;
 }
@@ -627,8 +686,5 @@ export function runAcp(baseUrl: string) {
 
   const stream = ndJsonStream(input, output);
 
-  new AgentSideConnection(
-    (client) => new OpenCodeAcpAgent(client, baseUrl),
-    stream
-  );
+  new AgentSideConnection((client) => new OpenCodeAcpAgent(client, baseUrl), stream);
 }

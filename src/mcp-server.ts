@@ -5,11 +5,22 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { Server } from "node:http";
 import { OpenCodeAcpAgent } from "./acp-agent.js";
-import { ClientCapabilities, TerminalOutputResponse, TerminalExitStatus } from "@zed-industries/agent-client-protocol";
+import {
+  ClientCapabilities,
+  TerminalOutputResponse,
+  TerminalExitStatus,
+} from "@zed-industries/agent-client-protocol";
 import * as diff from "diff";
+import type { Request, Response } from "express";
 
 import { sleep, unreachable, extractLinesWithByteLimit } from "./utils.js";
-import { PermissionResult } from "@anthropic-ai/claude-code";
+
+type PermissionResult = {
+  behavior: "allow" | "deny";
+  message?: string;
+  updatedInput?: any; // Consider refining this type later if needed
+  updatedPermissions?: Array<{ type: "setMode"; mode: string; destination: "session" }>;
+};
 
 export const SYSTEM_REMINDER = `
 
@@ -56,10 +67,10 @@ export function createMcpServer(
       {
         title: "Read",
         description: `Reads the content of the given file in the project.
-
-Never attempt to read a path that hasn't been previously mentioned.
-
-In sessions with ${toolNames.read} always use it instead of Read as it contains the most up-to-date contents.`,
+ 
+ Never attempt to read a path that hasn't been previously mentioned.
+ 
+ In sessions with ${toolNames.read} always use it instead of Read as it contains the most up-to-date contents.`,
         inputSchema: {
           abs_path: z.string().describe("The absolute path to the file to read."),
           offset: z
@@ -158,9 +169,9 @@ In sessions with ${toolNames.read} always use it instead of Read as it contains 
       {
         title: "Write",
         description: `Writes content to the specified file in the project.
-
-In sessions with ${toolNames.write} always use it instead of Write as it will
-allow the user to conveniently review changes.`,
+ 
+ In sessions with ${toolNames.write} always use it instead of Write as it will
+ allow the user to conveniently review changes.`,
         inputSchema: {
           abs_path: z.string().describe("The absolute path to the file to write"),
           content: z.string().describe("The full content to write"),
@@ -213,20 +224,20 @@ allow the user to conveniently review changes.`,
       {
         title: "Edit",
         description: `Edit a file.
-
-In sessions with ${toolNames.edit} always use it instead of Edit as it will
-allow the user to conveniently review changes.
-
-File editing instructions:
-- The \`old_string\` param must match existing file content, including indentation.
-- The \`old_string\` param must come from the actual file, not an outline.
-- The \`old_string\` section must not be empty.
-- Be minimal with replacements:
-  - For unique lines, include only those lines.
-  - For non-unique lines, include enough context to identify them.
-- Do not escape quotes, newlines, or other characters.
-- Only edit the specified file.
-- If the \`old_string\` value isn't found in the file, the edit won't be applied. The tool will fail and must be retried.`,
+ 
+ In sessions with ${toolNames.edit} always use it instead of Edit as it will
+ allow the user to conveniently review changes.
+ 
+ File editing instructions:
+ - The \`old_string\` param must match existing file content, including indentation.
+ - The \`old_string\` param must come from the actual file, not an outline.
+ - The \`old_string\` section must not be empty.
+ - Be minimal with replacements:
+   - For unique lines, include only those lines.
+   - For non-unique lines, include enough context to identify them.
+ - Do not escape quotes, newlines, or other characters.
+ - Only edit the specified file.
+ - If the \`old_string\` value isn't found in the file, the edit won't be applied. The tool will fail and must be retried.`,
         inputSchema: {
           abs_path: z.string().describe("The absolute path to the file to read."),
           old_string: z.string().describe("The old text to replace (must be unique in the file)"),
@@ -290,19 +301,19 @@ File editing instructions:
       {
         title: "Multi Edit",
         description: `Edit a file with multiple sequential edits.
-
-In sessions with ${toolNames.multiEdit} always use it instead of MultiEdit as it will
-allow the user to conveniently review changes.
-
-File editing instructions:
-- The \`old_string\` param must match existing file content, including indentation.
-- The \`old_string\` param must come from the actual file, not an outline.
-- The \`old_string\` section must not be empty.
-- Be minimal with replacements:
-  - For unique lines, include only those lines.
-  - For non-unique lines, include enough context to identify them, unless you're using \`replace_all\`
-- Do not escape quotes, newlines, or other characters.
-- If any of the provided \`old_string\` values aren't found in the file, no edits will be applied. The tool will fail and must be retried.`,
+ 
+ In sessions with ${toolNames.multiEdit} always use it instead of MultiEdit as it will
+ allow the user to conveniently review changes.
+ 
+ File editing instructions:
+ - The \`old_string\` param must match existing file content, including indentation.
+ - The \`old_string\` param must come from the actual file, not an outline.
+ - The \`old_string\` section must not be empty.
+ - Be minimal with replacements:
+   - For unique lines, include only those lines.
+   - For non-unique lines, include enough context to identify them, unless you're using \`replace_all\`
+ - Do not escape quotes, newlines, or other characters.
+ - If any of the provided \`old_string\` values aren't found in the file, no edits will be applied. The tool will fail and must be retried.`,
         inputSchema: {
           file_path: z.string().describe("The absolute path to the file to modify"),
           edits: z
@@ -444,7 +455,9 @@ File editing instructions:
         });
 
         const statusPromise = Promise.race([
-          handle.waitForExit().then((exitStatus: TerminalExitStatus) => ({ status: "exited" as const, exitStatus })),
+          handle
+            .waitForExit()
+            .then((exitStatus: TerminalExitStatus) => ({ status: "exited" as const, exitStatus })),
           abortPromise.then(() => ({ status: "aborted" as const, exitStatus: null })),
           sleep(input.timeout_ms).then(async () => {
             if (agent.backgroundTerminals[handle.id]?.status === "started") {
@@ -618,10 +631,10 @@ File editing instructions:
             };
           default: {
             return unreachable(bgTerm as never);
-           }
-         }
-       },
-     );
+          }
+        }
+      },
+    );
   }
 
   return server;
