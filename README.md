@@ -1,9 +1,9 @@
 # ACP adapter for Opencode
 
-
 This tool implements an ACP agent for [Opencode](https://github.com/sst/opencode), allowing you to use Opencode from [ACP-compatible](https://agentclientprotocol.com) clients such as [Zed](https://zed.dev)!
 
 It uses the official [Opencode SDK](https://opencode.ai/docs/sdk), supporting:
+
 - Client MCP servers
 
 Learn more about the [Agent Client Protocol](https://agentclientprotocol.com/).
@@ -19,8 +19,6 @@ To use Opencode, open the Agent Panel and click "New Opencode Thread" from the `
 https://github.com/user-attachments/assets/ddce66c7-79ac-47a3-ad59-4a6a3ca74903
 
 Read the docs on [External Agent](https://zed.dev/docs/ai/external-agents) support.
-
-
 
 #### Installation
 
@@ -38,14 +36,11 @@ To add this agent as a server in your environment, include the following configu
 ```json
 {
   "agent_servers": {
-      "Opencode Agent": {
-        "command": "npx",
-        "args": [
-          "tsx",
-          "path/to/src/index.ts"
-        ]
-      }
+    "Opencode Agent": {
+      "command": "npx",
+      "args": ["tsx", "path/to/src/index.ts"]
     }
+  }
 }
 ```
 
