@@ -4,8 +4,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { Server } from "node:http";
-import { ClaudeAcpAgent } from "./acp-agent.js";
-import { ClientCapabilities, TerminalOutputResponse } from "@zed-industries/agent-client-protocol";
+import { OpenCodeAcpAgent } from "./acp-agent.js";
+import { ClientCapabilities, TerminalOutputResponse, TerminalExitStatus } from "@zed-industries/agent-client-protocol";
 import * as diff from "diff";
 
 import { sleep, unreachable, extractLinesWithByteLimit } from "./utils.js";
@@ -43,7 +43,7 @@ export const toolNames = {
 const editToolNames = [toolNames.edit, toolNames.multiEdit, toolNames.write];
 
 export function createMcpServer(
-  agent: ClaudeAcpAgent,
+  agent: OpenCodeAcpAgent,
   sessionId: string,
   clientCapabilities: ClientCapabilities | undefined,
 ): McpServer {
@@ -444,7 +444,7 @@ File editing instructions:
         });
 
         const statusPromise = Promise.race([
-          handle.waitForExit().then((exitStatus) => ({ status: "exited" as const, exitStatus })),
+          handle.waitForExit().then((exitStatus: TerminalExitStatus) => ({ status: "exited" as const, exitStatus })),
           abortPromise.then(() => ({ status: "aborted" as const, exitStatus: null })),
           sleep(input.timeout_ms).then(async () => {
             if (agent.backgroundTerminals[handle.id]?.status === "started") {
@@ -471,6 +471,8 @@ File editing instructions:
             const currentOutput = await handle.currentOutput();
 
             agent.backgroundTerminals[handle.id] = {
+              handle: bgTerm.handle, // Keep the original handle
+              lastOutput: bgTerm.lastOutput, // Keep the original lastOutput
               status,
               pendingOutput: {
                 ...currentOutput,
@@ -553,7 +555,7 @@ File editing instructions:
             content: [
               {
                 type: "text",
-                text: toolCommandOutput(bgTerm.status, bgTerm.pendingOutput),
+                text: toolCommandOutput(bgTerm.status, bgTerm.pendingOutput), // It can be undefined, will fix toolCommandOutput next
               },
             ],
           };
@@ -584,6 +586,8 @@ File editing instructions:
             await bgTerm.handle.kill();
             const currentOutput = await bgTerm.handle.currentOutput();
             agent.backgroundTerminals[bgTerm.handle.id] = {
+              handle: bgTerm.handle, // Keep the original handle
+              lastOutput: bgTerm.lastOutput, // Keep the original lastOutput
               status: "killed",
               pendingOutput: {
                 ...currentOutput,
@@ -613,11 +617,11 @@ File editing instructions:
               content: [{ type: "text", text: "Command killed by timeout." }],
             };
           default: {
-            return unreachable(bgTerm);
-          }
-        }
-      },
-    );
+            return unreachable(bgTerm as never);
+           }
+         }
+       },
+     );
   }
 
   return server;
@@ -633,7 +637,7 @@ export const PERMISSION_TOOL_NAME = PERMISSION_SERVER_PREFIX + UNQUALIFIED_PERMI
  * Ideally it moves to the `canUseTool` callback in the future.
  */
 export function createPermissionMcpServer(
-  agent: ClaudeAcpAgent,
+  agent: OpenCodeAcpAgent,
   sessionId: string,
 ): Promise<Server> {
   const server = new McpServer(
@@ -816,8 +820,13 @@ function stripCommonPrefix(a: string, b: string): string {
 
 function toolCommandOutput(
   status: "started" | "aborted" | "exited" | "killed" | "timedOut",
-  output: TerminalOutputResponse,
+  output?: TerminalOutputResponse, // Make output optional
 ): string {
+  // Handle case where output is undefined
+  if (output === undefined) {
+    return `Command status: ${status}. No output available.`;
+  }
+
   const { exitStatus, output: commandOutput, truncated } = output;
 
   let toolOutput = "";

@@ -2,7 +2,6 @@ import {
   Agent,
   AgentSideConnection,
   AuthenticateRequest,
-  AvailableCommand,
   CancelNotification,
   ClientCapabilities,
   InitializeRequest,
@@ -14,208 +13,308 @@ import {
   PromptResponse,
   ReadTextFileRequest,
   ReadTextFileResponse,
-  RequestError,
   SetSessionModeRequest,
   SetSessionModeResponse,
-  TerminalHandle,
-  TerminalOutputResponse,
   WriteTextFileRequest,
   WriteTextFileResponse,
+  ContentBlock,
+  SessionNotification,
+  TerminalHandle, // Import TerminalHandle from ACP
+  TerminalOutputResponse,
 } from "@zed-industries/agent-client-protocol";
-import {
-  McpServerConfig,
-  Options,
-  PermissionMode,
-  Query,
-  query,
-  SDKAssistantMessage,
-  SDKUserMessage,
-} from "@anthropic-ai/claude-code";
-import * as fs from "node:fs";
-import * as path from "node:path";
-import * as os from "node:os";
-import { v7 as uuidv7 } from "uuid";
-import { nodeToWebReadable, nodeToWebWritable, Pushable, unreachable } from "./utils.js";
-import { SessionNotification } from "@zed-industries/agent-client-protocol";
-import {
-  createMcpServer,
-  createPermissionMcpServer,
-  PERMISSION_TOOL_NAME,
-  toolNames,
-} from "./mcp-server.js";
-import { AddressInfo } from "node:net";
-import { toolInfoFromToolUse, planEntries, toolUpdateFromToolResult } from "./tools.js";
 
-type Session = {
-  query: Query;
-  input: Pushable<SDKUserMessage>;
-  cancelled: boolean;
-  permissionMode: PermissionMode;
+// Define StopReason locally as it's not exported as a type from the ACP protocol library
+type StopReason = "end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled";
+
+import {
+  AssistantMessage,
+  UserMessage,
+  Part,
+  TextPartInput,
+  FilePartInput,
+  createOpencodeClient,
+  EventMessagePartUpdated,
+  EventMessageUpdated,
+} from "@opencode-ai/sdk";
+import { nodeToWebReadable, nodeToWebWritable, Pushable } from "./utils.js";
+
+// Use the imported TerminalHandle type
+type BackgroundTerminal = {
+  handle: TerminalHandle;
+  lastOutput: TerminalOutputResponse | null;
+  status: "started" | "aborted" | "exited" | "killed" | "timedOut";
+  pendingOutput?: TerminalOutputResponse;
 };
 
-type BackgroundTerminal =
-  | {
-      handle: TerminalHandle;
-      status: "started";
-      lastOutput: TerminalOutputResponse | null;
-    }
-  | {
-      status: "aborted" | "exited" | "killed" | "timedOut";
-      pendingOutput: TerminalOutputResponse;
-    };
+// Define local enums for ToolCallStatus and ToolKind based on ACP schema
+enum ToolCallStatus {
+  Pending = "pending",
+  InProgress = "in_progress",
+  Completed = "completed",
+  Failed = "failed",
+}
 
-type ToolUseCache = {
-  [key: string]: { type: "tool_use"; id: string; name: string; input: any };
+enum ToolKind {
+  Read = "read",
+  Edit = "edit",
+  Delete = "delete",
+  Move = "move",
+  Search = "search",
+  Execute = "execute",
+  Think = "think",
+  Fetch = "fetch",
+  SwitchMode = "switch_mode",
+  Other = "other",
+}
+
+type Session = {
+  input: Pushable<UserMessage>;
+  cancelled: boolean;
+  permissionMode: string;
+  opencodeClient: ReturnType<typeof createOpencodeClient>;
+  messageUpdateResolver?: (message: AssistantMessage) => void;
+  lastSentTextByMessagePartId: Map<string, string>; // Add this to store the last sent text for delta calculation
 };
 
 // Implement the ACP Agent interface
-export class ClaudeAcpAgent implements Agent {
+export class OpenCodeAcpAgent implements Agent {
   sessions: {
     [key: string]: Session;
   };
   client: AgentSideConnection;
-  toolUseCache: ToolUseCache;
-  fileContentCache: { [key: string]: string };
-  backgroundTerminals: { [key: string]: BackgroundTerminal } = {};
+  opencodeClient: ReturnType<typeof createOpencodeClient>;
   clientCapabilities?: ClientCapabilities;
+  backgroundTerminals: { [id: string]: BackgroundTerminal }; // Add this line
 
-  constructor(client: AgentSideConnection) {
+  constructor(client: AgentSideConnection, baseUrl: string) {
     this.sessions = {};
     this.client = client;
-    this.toolUseCache = {};
-    this.fileContentCache = {};
+    this.opencodeClient = createOpencodeClient({
+      baseUrl: baseUrl,
+    });
+    this.backgroundTerminals = {}; // Initialize backgroundTerminals
+
+    this.setupEventHandlers();
+  }
+
+  private async setupEventHandlers() {
+    console.error(`[setupEventHandlers] Subscribing to OpenCode events.`);
+    const events = await this.opencodeClient.event.subscribe();
+    console.error(`[setupEventHandlers] Event stream started.`);
+    for await (const event of events.stream) {
+      console.error(`[setupEventHandlers] Received event: ${event.type}`);
+      if (event.type === 'message.part.updated') {
+        const partUpdatedEvent = event as EventMessagePartUpdated; // Explicitly cast the event
+        const { part } = partUpdatedEvent.properties; // Get the part object
+        const sessionID = part.sessionID; // Extract sessionID from the part object
+        
+        console.error(`[setupEventHandlers] Processing message.part.updated for sessionID: ${sessionID}, partID: ${part.id}, type: ${part.type}`);
+
+        // Simplified echo filter: if part.type is 'text' and has no 'time' property, it's an echo of user input.
+        if (part.type === 'text' && !part.time) {
+            console.error(`[ECHO FILTER]: Dropping echo of user input (text part with no timestamp) for sessionID: ${sessionID}, partID: ${part.id}`);
+            continue; // Skip this echo
+        }
+
+        if (!sessionID || !part) {
+          console.warn(`[Event Handler] Missing sessionID or part in message.part.updated event properties: ${JSON.stringify(partUpdatedEvent.properties)}`);
+          continue; // Skip this malformed event
+        }
+
+        const session = this.sessions[sessionID];
+        if (session) {
+          // Implement Delta Calculation for Text Parts
+          if (part.type === 'text') {
+            const currentText = part.text;
+            const previousText = session.lastSentTextByMessagePartId.get(part.id) || '';
+            const deltaText = currentText.substring(previousText.length);
+            
+            session.lastSentTextByMessagePartId.set(part.id, currentText);
+
+            if (deltaText.length > 0) {
+              await this.client.sessionUpdate({
+                sessionId: sessionID,
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  content: { type: "text", text: deltaText }
+                }
+              });
+              console.error(`[setupEventHandlers] Sent agent_message_chunk delta for part ${part.id}`);
+            }
+            continue; // Skip further processing for this text part, as its delta has been handled.
+          }
+
+          // Implement Delta Calculation for Reasoning Parts
+          if (part.type === 'reasoning') {
+            const currentText = part.text;
+            const previousText = session.lastSentTextByMessagePartId.get(part.id) || '';
+            const deltaText = currentText.substring(previousText.length);
+            session.lastSentTextByMessagePartId.set(part.id, currentText);
+
+            if (deltaText.length > 0) {
+              await this.client.sessionUpdate({
+                sessionId: sessionID,
+                update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: deltaText } }
+              });
+              console.error(`[setupEventHandlers] Sent agent_thought_chunk delta for part ${part.id}`);
+            }
+            continue; // Skip further processing for this reasoning part, as its delta has been handled.
+          }
+
+          // Handle tool parts with permission requests
+          if (part.type === 'tool' && part.state.status === 'pending') {
+            const { callID, tool } = part;
+            const toolDescription = `Allow agent to run tool: ${tool}?`;
+            
+            let permissionGranted = false;
+            if (session.permissionMode === "bypassPermissions" || session.permissionMode === "acceptEdits") {
+              permissionGranted = true;
+            } else if (session.permissionMode === "plan") {
+              await this.client.sessionUpdate({
+                sessionId: sessionID,
+                update: {
+                  sessionUpdate: "tool_call_update",
+                  toolCallId: callID,
+                  status: ToolCallStatus.Failed,
+                  content: [{ type: "content", content: { type: "text", text: `Tool execution blocked in Plan Mode.` } }],
+                },
+              });
+              continue; // Skip further processing for this tool
+            } else { // "default" mode - Always Ask
+              await this.client.sessionUpdate({
+                sessionId: sessionID,
+                update: {
+                  sessionUpdate: "tool_call",
+                  toolCallId: callID,
+                  title: tool,
+                  status: ToolCallStatus.Pending,
+                  kind: mapToolKind(tool),
+                },
+              });
+
+              const permissionResponse = await this.client.requestPermission({
+                sessionId: sessionID,
+                toolCall: {
+                  toolCallId: callID,
+                  title: toolDescription,
+                },
+                options: [
+                  { optionId: "allow_once", name: "Allow Once", kind: "allow_once" },
+                  { optionId: "reject_once", name: "Deny", kind: "reject_once" },
+                ],
+              });
+
+              if (permissionResponse.outcome.outcome !== "selected" || permissionResponse.outcome.optionId !== "allow_once") {
+                await this.client.sessionUpdate({
+                  sessionId: sessionID,
+                  update: {
+                    sessionUpdate: "tool_call_update",
+                    toolCallId: callID,
+                    status: ToolCallStatus.Failed,
+                    content: [{ type: "content", content: { type: "text", text: `Permission for tool '${tool}' denied.` } }],
+                  },
+                });
+                continue; // Skip further processing for this tool
+              }
+            }
+
+            if (permissionGranted) {
+              // If permission is granted (or automatically accepted), then send the tool_call notification.
+              // Note: The tool_call notification for pending status is already sent above if permissionMode is "default".
+              // For other modes, we need to send it here.
+              if (session.permissionMode !== "default") {
+                await this.client.sessionUpdate({
+                  sessionId: sessionID,
+                  update: {
+                    sessionUpdate: "tool_call",
+                    toolCallId: callID,
+                    title: tool,
+                    status: ToolCallStatus.Pending,
+                    kind: mapToolKind(tool),
+                  },
+                });
+              }
+            }
+          }
+
+          // Ensure Other Part Types are Handled or remaining tool parts
+          const notifications = toAcpNotifications(
+            {} as AssistantMessage, // Placeholder, as full message info is not in part update
+            part,
+            sessionID
+          );
+          for (const notification of notifications) {
+            await this.client.sessionUpdate(notification);
+            // console.error(`[setupEventHandlers] Sent notification for part ${part.id}, type: ${part.type}`); // Removed to prevent parsing errors
+          }
+        }
+      } else if (event.type === 'message.updated') {
+        const messageUpdatedEvent = event as EventMessageUpdated;
+        const { info: messageInfo } = messageUpdatedEvent.properties;
+        const session = this.sessions[messageInfo.sessionID];
+        if (session && session.messageUpdateResolver) {
+          session.messageUpdateResolver(messageInfo as AssistantMessage);
+        }
+      }
+    }
   }
 
   async initialize(request: InitializeRequest): Promise<InitializeResponse> {
     this.clientCapabilities = request.clientCapabilities;
     return {
       protocolVersion: 1,
-      // todo!()
       agentCapabilities: {
         promptCapabilities: {
           image: true,
+          audio: true,
           embeddedContext: true,
         },
         mcpCapabilities: {
           http: true,
-          sse: true,
+          sse: false,
         },
+        loadSession: false,
       },
-      authMethods: [
-        {
-          description: "Run `claude /login` in the terminal",
-          name: "Log in with Claude Code",
-          id: "claude-login",
-        },
-      ],
+      authMethods: [],
     };
   }
+
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
-    if (
-      fs.existsSync(path.resolve(os.homedir(), ".claude.json.backup")) &&
-      !fs.existsSync(path.resolve(os.homedir(), ".claude.json"))
-    ) {
-      throw RequestError.authRequired();
-    }
-
-    const sessionId = uuidv7();
-    const input = new Pushable<SDKUserMessage>();
-
-    const mcpServers: Record<string, McpServerConfig> = {};
-    if (Array.isArray(params.mcpServers)) {
-      for (const server of params.mcpServers) {
-        if ("type" in server) {
-          mcpServers[server.name] = {
-            type: server.type,
-            url: server.url,
-            headers: server.headers
-              ? Object.fromEntries(server.headers.map((e) => [e.name, e.value]))
-              : undefined,
-          };
-        } else {
-          mcpServers[server.name] = {
-            type: "stdio",
-            command: server.command,
-            args: server.args,
-            env: server.env
-              ? Object.fromEntries(server.env.map((e) => [e.name, e.value]))
-              : undefined,
-          };
-        }
-      }
-    }
-
-    const server = createMcpServer(this, sessionId, this.clientCapabilities);
-    mcpServers["acp"] = {
-      type: "sdk",
-      name: "acp",
-      instance: server,
-    };
-
-    // Ideally replace with `canUseTool`
-    const permissionServer = await createPermissionMcpServer(this, sessionId);
-    const address = permissionServer.address() as AddressInfo;
-    mcpServers["acpPermission"] = {
-      type: "http",
-      url: "http://127.0.0.1:" + address.port + "/mcp",
-      headers: {
-        "x-acp-proxy-session-id": sessionId,
-      },
-    };
-
-    const options: Options = {
-      cwd: params.cwd,
-      mcpServers,
-      permissionPromptToolName: PERMISSION_TOOL_NAME,
-      stderr: (err) => console.error(err),
-      // note: although not documented by the types, passing an absolute path
-      // here works to find zed's managed node version.
-      executable: process.execPath as any,
-    };
-
-    const allowedTools = [];
-    const disallowedTools = [];
-    if (this.clientCapabilities?.fs?.readTextFile) {
-      allowedTools.push(toolNames.read);
-      disallowedTools.push("Read");
-    }
-    if (this.clientCapabilities?.fs?.writeTextFile) {
-      allowedTools.push(toolNames.write);
-      disallowedTools.push("Write", "Edit", "MultiEdit");
-    }
-    if (this.clientCapabilities?.terminal) {
-      allowedTools.push(toolNames.bashOutput, toolNames.killBash);
-      disallowedTools.push("Bash", "BashOutput", "KillBash");
-    }
-
-    if (allowedTools.length > 0) {
-      options.allowedTools = allowedTools;
-    }
-    if (disallowedTools.length > 0) {
-      options.disallowedTools = disallowedTools;
-    }
-
-    const q = query({
-      prompt: input,
-      options,
+    console.error(`[newSession] CWD received: ${params.cwd}`);
+    const { data: sessionData, error: sessionError } = await this.opencodeClient.session.create({
+      query: { directory: params.cwd },
+      body: {}, // Add empty body
     });
+
+    if (sessionError || !sessionData) {
+      const errorDetails = sessionError ? JSON.stringify(sessionError) : 'undefined response';
+      throw new Error(`Failed to create opencode session: ${errorDetails}`);
+    }
+    const sessionId = sessionData.id;
+    const input = new Pushable<UserMessage>();
+
     this.sessions[sessionId] = {
-      query: q,
       input: input,
       cancelled: false,
       permissionMode: "default",
+      opencodeClient: this.opencodeClient,
+      lastSentTextByMessagePartId: new Map<string, string>(), // Initialize the map
     };
 
-    getAvailableSlashCommands(q).then((availableCommands) => {
-      this.client.sessionUpdate({
-        sessionId,
-        update: {
-          sessionUpdate: "available_commands_update",
-          availableCommands,
-        },
-      });
+    // Since getAvailableSlashCommands is commented out, we send an empty array.
+    // If it were active, we would call it here.
+    this.client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: "available_commands_update",
+        availableCommands: [],
+      },
     });
 
+    console.error(`[newSession] Created session ID: ${sessionId}`);
+    console.error(`[newSession] Returning modes for session ID: ${sessionId}`);
+
+    // Align with the expected modes from the user's example
     return {
       sessionId,
       modes: {
@@ -251,93 +350,81 @@ export class ClaudeAcpAgent implements Agent {
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
+    console.error(`[prompt] Received prompt for session ID: ${params.sessionId}`);
+
     if (!this.sessions[params.sessionId]) {
+      console.error(`[prompt] Error: Session not found for ID: ${params.sessionId}`);
       throw new Error("Session not found");
     }
 
     this.sessions[params.sessionId].cancelled = false;
 
-    const { query, input } = this.sessions[params.sessionId];
+    const session = this.sessions[params.sessionId];
+    const opencodeClient = session.opencodeClient;
 
-    input.push(promptToClaude(params));
-    while (true) {
-      const { value: message, done } = await query.next();
-      if (done || !message) {
-        if (this.sessions[params.sessionId].cancelled) {
-          return { stopReason: "cancelled" };
-        }
-        break;
-      }
-      switch (message.type) {
-        case "system":
-          break;
-        case "result": {
-          if (this.sessions[params.sessionId].cancelled) {
-            return { stopReason: "cancelled" };
+    // Convert ACP prompt to Opencode prompt parts
+    const opencodePromptParts: (TextPartInput | FilePartInput)[] = params.prompt.map((part: ContentBlock) => {
+      switch (part.type) {
+        case "text":
+          return { type: "text", text: part.text };
+        case "resource_link":
+          return { type: "text", text: `Resource Link: ${part.uri} (${part.name})` };
+        case "resource":
+          if ("text" in part.resource) {
+            return { type: "text", text: part.resource.text };
           }
-
-          // todo!() how is rate-limiting handled?
-          switch (message.subtype) {
-            case "success": {
-              if (message.result.includes("Please run /login")) {
-                throw RequestError.authRequired();
-              }
-              return { stopReason: "end_turn" };
-            }
-            case "error_during_execution":
-              return { stopReason: "refusal" };
-            case "error_max_turns":
-              return { stopReason: "max_turn_requests" };
-            default:
-              return { stopReason: "refusal" };
-          }
-        }
-        case "user":
-        case "assistant": {
-          if (this.sessions[params.sessionId].cancelled) {
-            continue;
-          }
-
-          // Slash commands like /compact can generate invalid output... doesn't match
-          // their own docs: https://docs.anthropic.com/en/docs/claude-code/sdk/sdk-slash-commands#%2Fcompact-compact-conversation-history
-          if (
-            typeof message.message.content === "string" &&
-            message.message.content.includes("<local-command-stdout>")
-          ) {
-            console.log(message.message.content);
-            break;
-          }
-
-          if (
-            typeof message.message.content === "string" &&
-            message.message.content.includes("<local-command-stderr>")
-          ) {
-            console.error(message.message.content);
-            break;
-          }
-
-          if (
-            message.message.model === "<synthetic>" &&
-            message.message.content.length === 1 &&
-            message.message.content[0].text.includes("Please run /login")
-          ) {
-            throw RequestError.authRequired();
-          }
-          for (const notification of toAcpNotifications(
-            message,
-            params.sessionId,
-            this.toolUseCache,
-            this.fileContentCache,
-          )) {
-            await this.client.sessionUpdate(notification);
-          }
-          break;
-        }
+          return { type: "text", text: `Binary Resource: ${part.resource.uri}` };
+        case "image":
+          return {
+            type: "file",
+            mime: part.mimeType,
+            url: part.uri || `data:${part.mimeType};base64,${part.data}`,
+          };
+        case "audio":
+          return {
+            type: "file",
+            mime: part.mimeType,
+            url: `data:${part.mimeType};base64,${part.data}`,
+          };
         default:
-          unreachable(message as never);
+          return { type: "text", text: `Unsupported content type: ${(part as any).type}` };
       }
+    });
+
+    // Send the prompt to the Opencode server
+    console.error(`[prompt] Sending prompt to Opencode server for session ID: ${params.sessionId}`);
+    const { data: promptData, error: promptError } = await opencodeClient.session.prompt({
+      path: { id: params.sessionId },
+      body: {
+        parts: opencodePromptParts,
+      },
+    });
+
+    if (promptError) {
+      console.error("Opencode prompt returned an error:", promptError);
+      throw promptError;
     }
-    throw new Error("Session did not end in result");
+
+    if (!promptData) {
+      console.error("Opencode prompt returned an unexpected empty response");
+      throw new Error("Unexpected empty response from Opencode prompt.");
+    }
+
+    // Determine the stop reason based on the final message information received directly from the prompt call
+    let stopReason: StopReason = "end_turn";
+    if (promptData.info.error) {
+        // If there's an error in the final message info, it's either cancelled or a refusal
+        if (promptData.info.error.name === "MessageAbortedError") {
+            stopReason = "cancelled";
+        } else {
+            stopReason = "refusal";
+        }
+    }
+    // Other stop reasons like max_tokens, max_turn_requests are not directly available
+    // from AssistantMessage, so default to end_turn if no error.
+
+    console.error(`[prompt] Returning stopReason: ${stopReason} for session ID: ${params.sessionId}`);
+    return { stopReason };
   }
 
   async cancel(params: CancelNotification): Promise<void> {
@@ -345,7 +432,7 @@ export class ClaudeAcpAgent implements Agent {
       throw new Error("Session not found");
     }
     this.sessions[params.sessionId].cancelled = true;
-    await this.sessions[params.sessionId].query.interrupt();
+    await this.sessions[params.sessionId].opencodeClient.session.abort({ path: { id: params.sessionId } });
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
@@ -357,14 +444,8 @@ export class ClaudeAcpAgent implements Agent {
       case "default":
       case "acceptEdits":
       case "plan":
-        this.sessions[params.sessionId].permissionMode = params.modeId;
-        await this.sessions[params.sessionId].query.setPermissionMode(params.modeId);
-        return {};
       case "bypassPermissions":
-        // For some reason, the SDK doesn't support setting the mode to `bypassPermissions`
-        // so we do it ourselves
-        this.sessions[params.sessionId].permissionMode = "bypassPermissions";
-        await this.sessions[params.sessionId].query.setPermissionMode("acceptEdits");
+        this.sessions[params.sessionId].permissionMode = params.modeId;
         return {};
       default:
         throw new Error("Invalid mode");
@@ -372,280 +453,182 @@ export class ClaudeAcpAgent implements Agent {
   }
 
   async readTextFile(params: ReadTextFileRequest): Promise<ReadTextFileResponse> {
-    const response = await this.client.readTextFile(params);
-    if (!params.limit && !params.line) {
-      this.fileContentCache[params.path] = response.content;
-    }
-    return response;
+    return this.client.readTextFile(params);
   }
 
   async writeTextFile(params: WriteTextFileRequest): Promise<WriteTextFileResponse> {
-    const response = await this.client.writeTextFile(params);
-    this.fileContentCache[params.path] = params.content;
-    return response;
+    return this.client.writeTextFile(params);
   }
 }
 
-async function getAvailableSlashCommands(query: Query): Promise<AvailableCommand[]> {
-  const UNSUPPORTED_COMMANDS = [
-    "add-dir",
-    "agents", // Modal
-    "bashes", // Modal
-    "bug", // Modal
-    "clear", // Escape Codes
-    "config", // Modal
-    "context", // Escape Codes
-    "cost", // Escape Codes
-    "doctor", // Escape Codes
-    "exit",
-    "export", // Modal
-    "help", // Modal
-    "hooks", // Modal
-    "ide", // Modal
-    "install-github-app", // Modal
-    "login",
-    "logout",
-    "memory",
-    "mcp",
-    "migrate-installer", // Modal
-    "model", // Not supported via SDK?
-    "output-style", // Modal
-    "output-style:new", // Modal
-    "permissions", // Modal
-    "privacy-settings",
-    "release-notes", // Escape Codes
-    "resume",
-    "status", // Not supported via SDK?
-    "statusline", // Not needed
-    "terminal-setup", // Not needed
-    "todos", // Escape Codes
-    "vim", // Not needed
-  ];
-  const commands = await query.supportedCommands();
+// async function getAvailableSlashCommands(opencodeClient: ReturnType<typeof createOpencodeClient>): Promise<AvailableCommand[]> {
+//   const UNSUPPORTED_COMMANDS = [
+//     "add-dir", "agents", "bashes", "bug", "clear", "config", "context", "cost",
+//     "doctor", "exit", "export", "help", "hooks", "ide", "install-github-app",
+//     "login", "logout", "memory", "mcp", "migrate-installer", "output-style",
+//     "output-style:new", "permissions", "privacy-settings", "release-notes",
+//     "resume", "status", "statusline", "terminal-setup", "todos", "vim",
+//     "run", "serve", "upgrade",
+//   ];
+// 
+//   try {
+//     const response = await opencodeClient.command.list();
+//     if (!response.data) {
+//       return [];
+//     }
+//     return response.data
+//       .map((command: any) => ({
+//         name: command.name,
+//         description: command.description || "",
+//         input: command.inputHint ? { hint: command.inputHint } : null,
+//       }))
+//       .filter((command: AvailableCommand) =>
+//         !(command.name.match(/\(MCP\)/) || UNSUPPORTED_COMMANDS.includes(command.name))
+//       );
+//   } catch (error) {
+//     console.error("Error fetching available commands from Opencode SDK:", error);
+//     return [];
+//   }
+// }
 
-  return commands
-    .map((command) => {
-      const input = command.argumentHint ? { hint: command.argumentHint } : null;
-      return {
-        name: command.name,
-        // @ts-expect-error type in the ts interface
-        description: command.description || "",
-        input,
-      };
-    })
-    .filter(
-      (command: AvailableCommand) =>
-        !(command.name.match(/\(MCP\)/) || UNSUPPORTED_COMMANDS.includes(command.name)),
-    );
-}
-
-function formatUriAsLink(uri: string): string {
-  try {
-    if (uri.startsWith("file://")) {
-      const path = uri.slice(7); // Remove "file://"
-      const name = path.split("/").pop() || path;
-      return `[@${name}](${uri})`;
-    } else if (uri.startsWith("zed://")) {
-      const parts = uri.split("/");
-      const name = parts[parts.length - 1] || uri;
-      return `[@${name}](${uri})`;
-    }
-    return uri;
-  } catch {
-    return uri;
-  }
-}
-
-function promptToClaude(prompt: PromptRequest): SDKUserMessage {
-  const content: any[] = [];
-  const context: any[] = [];
-
-  for (const chunk of prompt.prompt) {
-    switch (chunk.type) {
-      case "text":
-        content.push({ type: "text", text: chunk.text });
-        break;
-      case "resource_link": {
-        const formattedUri = formatUriAsLink(chunk.uri);
-        content.push({
-          type: "text",
-          text: formattedUri,
-        });
-        break;
-      }
-      case "resource": {
-        if ("text" in chunk.resource) {
-          const formattedUri = formatUriAsLink(chunk.resource.uri);
-          content.push({
-            type: "text",
-            text: formattedUri,
-          });
-          context.push({
-            type: "text",
-            text: `\n<context ref="${chunk.resource.uri}">\n${chunk.resource.text}\n</context>`,
-          });
-        }
-        // Ignore blob resources (unsupported)
-        break;
-      }
-      case "image":
-        if (chunk.data) {
-          content.push({
-            type: "image",
-            source: {
-              type: "base64",
-              data: chunk.data,
-              media_type: chunk.mimeType,
-            },
-          });
-        } else if (chunk.uri && chunk.uri.startsWith("http")) {
-          content.push({
-            type: "image",
-            source: {
-              type: "url",
-              url: chunk.uri,
-            },
-          });
-        }
-        break;
-      // Ignore audio and other unsupported types
-      default:
-        break;
-    }
-  }
-
-  content.push(...context);
-
-  return {
-    type: "user",
-    message: {
-      role: "user",
-      content: content,
-    },
-    session_id: prompt.sessionId,
-    parent_tool_use_id: null,
-  };
-}
-
-/**
- * Convert an SDKAssistantMessage (Claude) to a SessionNotification (ACP).
- * Only handles text, image, and thinking chunks for now.
- */
 export function toAcpNotifications(
-  message: SDKAssistantMessage | SDKUserMessage,
+  // messageInfo is now primarily for error handling, or specific message-level properties
+  messageInfo: AssistantMessage,
+  messagePart: Part,
   sessionId: string,
-  toolUseCache: ToolUseCache,
-  fileContentCache: { [key: string]: string },
 ): SessionNotification[] {
-  const chunks = message.message.content as ContentChunk[];
-  const output = [];
-  // Only handle the first chunk for streaming; extend as needed for batching
-  for (const chunk of chunks) {
-    let update: SessionNotification["update"] | null = null;
-    switch (chunk.type) {
-      case "text":
-        update = {
-          sessionUpdate: "agent_message_chunk",
-          content: {
-            type: "text",
-            text: chunk.text,
-          },
-        };
-        break;
-      case "image":
-        update = {
-          sessionUpdate: "agent_message_chunk",
-          content: {
-            type: "image",
-            data: chunk.source.type === "base64" ? chunk.source.data : "",
-            mimeType: chunk.source.type === "base64" ? chunk.source.media_type : "",
-            uri: chunk.source.type === "url" ? chunk.source.url : undefined,
-          },
-        };
-        break;
-      case "thinking":
-        update = {
-          sessionUpdate: "agent_thought_chunk",
-          content: {
-            type: "text",
-            text: chunk.thinking,
-          },
-        };
-        break;
-      case "tool_use":
-        toolUseCache[chunk.id] = chunk;
-        if (chunk.name === "TodoWrite") {
-          update = {
-            sessionUpdate: "plan",
-            entries: planEntries(chunk.input),
-          };
-        } else {
-          update = {
-            toolCallId: chunk.id,
-            sessionUpdate: "tool_call",
-            rawInput: chunk.input,
-            status: "pending",
-            ...toolInfoFromToolUse(chunk, fileContentCache),
-          };
-        }
-        break;
+  const output: SessionNotification[] = [];
 
-      case "tool_result": {
-        const toolUse = toolUseCache[chunk.tool_use_id];
-        if (!toolUse) {
-          console.error(
-            `[claude-code-acp] Got a tool result for tool use that wasn't tracked: ${chunk.tool_use_id}`,
-          );
-          break;
-        }
-
-        if (toolUse.name !== "TodoWrite") {
-          update = {
-            toolCallId: chunk.tool_use_id,
-            sessionUpdate: "tool_call_update",
-            status: chunk.is_error ? "failed" : "completed",
-            ...toolUpdateFromToolResult(chunk, toolUseCache[chunk.tool_use_id]),
-          };
-        }
-        break;
+  let update: SessionNotification["update"] | null = null;
+  switch (messagePart.type) {
+    case "text":
+      // For streaming, text parts are typically chunks
+      update = {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: messagePart.text },
+      };
+      break;
+    case "tool": {
+      // Tool parts can represent calls, updates, completion, or errors
+      const { state, callID, tool } = messagePart;
+      if (state.status === "pending") {
+        update = {
+          sessionUpdate: "tool_call",
+          toolCallId: callID,
+          title: tool,
+          status: ToolCallStatus.Pending,
+          kind: mapToolKind(tool),
+        };
+      } else if (state.status === "running") {
+        update = {
+          sessionUpdate: "tool_call_update",
+          toolCallId: callID,
+          title: state.title || tool,
+          status: ToolCallStatus.InProgress,
+          content: [{ type: "content", content: { type: "text", text: `Tool input: ${JSON.stringify(state.input || {})}` } }],
+        };
+      } else if (state.status === "completed") {
+        update = {
+          sessionUpdate: "tool_call_update",
+          toolCallId: callID,
+          status: ToolCallStatus.Completed,
+          content: [{ type: "content", content: { type: "text", text: JSON.stringify(state.output) } }],
+        };
+      } else if (state.status === "error") {
+        update = {
+          sessionUpdate: "tool_call_update",
+          toolCallId: callID,
+          status: ToolCallStatus.Failed,
+          content: [{ type: "content", content: { type: "text", text: JSON.stringify(state.error) } }],
+        };
       }
+      break;
+    }
+    case "file":
+      // Files are typically sent as part of the message content
+      update = {
+        sessionUpdate: "agent_message_chunk", // Or a more specific "file" update if ACP supported it
+        content: messagePart.mime.startsWith("image/")
+          ? { type: "image", mimeType: messagePart.mime, uri: messagePart.url, data: "" }
+          : { type: "text", text: `File: ${messagePart.filename || messagePart.url} (${messagePart.mime})` },
+      };
+      break;
+    case "reasoning":
+      update = {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: messagePart.text },
+      };
+      break;
+    case "patch":
+      update = {
+        sessionUpdate: "tool_call", // Or tool_call_update if it's an update to an existing one
+        toolCallId: `patch-${messagePart.hash}`, // Generate a unique ID
+        title: `Applying patch to ${messagePart.files.join(", ")}`,
+        status: ToolCallStatus.Completed, // Patch is usually completed upon receipt
+        kind: ToolKind.Edit,
+        content: [
+          {
+            type: "content",
+            content: { type: "text", text: `Patch applied with hash: ${messagePart.hash}` },
+          },
+        ],
+      };
+      break;
+    case "snapshot":
+    case "agent":
+    case "step-start":
+    case "step-finish":
+      // These types are internal to OpenCode or handled by message.updated events
+      // console.log(`Ignoring '${messagePart.type}' part from Opencode SDK event.`); // Removed to prevent parsing errors
+      break;
+    default: {
+      const unknownPart = messagePart as any;
+      console.warn(`Unhandled OpenCode message part type from event: ${unknownPart.type}`);
+      break;
+    }
+  }
 
-      default:
-        throw new Error("unhandled chunk type: " + chunk.type);
-    }
-    if (update) {
-      output.push({ sessionId, update });
-    }
+  if (update) {
+    output.push({ sessionId, update });
+  }
+
+  // Handle message-level errors if present
+  if (messageInfo && messageInfo.error) {
+    const error = messageInfo.error as any;
+    output.push({
+      sessionId,
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: {
+          type: "text",
+          text: `Error from OpenCode: ${error.name} - ${error.message || JSON.stringify(error.data)}`,
+        },
+      },
+    });
   }
 
   return output;
 }
 
-export function runAcp() {
+function mapToolKind(toolName: string): ToolKind {
+  if (toolName.startsWith("read")) return ToolKind.Read;
+  if (toolName.startsWith("write") || toolName.startsWith("edit") || toolName.startsWith("apply") || toolName.startsWith("insert")) return ToolKind.Edit;
+  if (toolName.startsWith("execute")) return ToolKind.Execute;
+  if (toolName.startsWith("search") || toolName.startsWith("list")) return ToolKind.Search;
+  if (toolName.startsWith("browser")) return ToolKind.Fetch;
+  if (toolName.startsWith("update") || toolName.startsWith("ask") || toolName.startsWith("new_task")) return ToolKind.Think;
+  if (toolName.startsWith("switch")) return ToolKind.SwitchMode;
+  return ToolKind.Other;
+}
+
+export function runAcp(baseUrl: string) {
   const input = nodeToWebWritable(process.stdout);
   const output = nodeToWebReadable(process.stdin);
 
   const stream = ndJsonStream(input, output);
-  new AgentSideConnection((client) => new ClaudeAcpAgent(client), stream);
+
+  new AgentSideConnection(
+    (client) => new OpenCodeAcpAgent(client, baseUrl),
+    stream
+  );
 }
-
-type ContentChunk =
-  | { type: "text"; text: string }
-  | { type: "tool_use"; id: string; name: string; input: any }
-  | {
-      type: "tool_result";
-      content: string;
-      tool_use_id: string;
-      is_error: boolean;
-    } // content type depends on your Content definition
-  | { type: "thinking"; thinking: string }
-  | { type: "redacted_thinking" }
-  | { type: "image"; source: ImageSource }
-  | { type: "document" }
-  | { type: "web_search_tool_result" }
-  | { type: "untagged_text"; text: string };
-
-// Example ImageSource type (adjust as needed)
-type ImageSource =
-  | { type: "base64"; data: string; media_type: string }
-  | { type: "url"; url: string };

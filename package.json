@@ -1,13 +1,13 @@
 {
-  "name": "@zed-industries/claude-code-acp",
+  "name": "@zed-industries/opencode-acp",
   "publishConfig": {
     "access": "public"
   },
   "bin": {
-    "claude-code-acp": "./dist/index.js"
+    "opencode-acp": "./dist/index.js"
   },
   "version": "0.4.3",
-  "description": "An ACP-compatible coding agent powered by the Claude Code SDK (TypeScript)",
+  "description": "An ACP-compatible coding agent powered by the opencode SDK (TypeScript)",
   "main": "dist/index.js",
   "type": "module",
   "files": [
@@ -32,36 +32,31 @@
     "prepublishOnly": "npm run build"
   },
   "keywords": [
-    "claude",
+    "opencode",
     "acp",
     "agent",
-    "anthropic",
+    "ai",
     "typescript",
     "sdk",
     "code"
   ],
-  "homepage": "https://github.com/zed-industries/claude-code-acp#readme",
+  "homepage": "https://github.com/zed-industries/opencode-acp#readme",
   "bugs": {
-    "url": "https://github.com/zed-industries/claude-code-acp/issues"
+    "url": "https://github.com/zed-industries/opencode-acp/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zed-industries/claude-code-acp.git"
+    "url": "git+https://github.com/zed-industries/opencode-acp.git"
   },
   "author": "Zed Industries",
   "license": "Apache-2.0",
   "dependencies": {
-    "@anthropic-ai/claude-code": "1.0.119",
-    "@modelcontextprotocol/sdk": "1.18.1",
+    "@opencode-ai/sdk": "^0.11.1",
     "@zed-industries/agent-client-protocol": "0.4.0",
     "diff": "8.0.2",
-    "express": "5.1.0",
-    "minimist": "1.2.8",
     "uuid": "13.0.0"
   },
   "devDependencies": {
-    "@types/express": "5.0.3",
-    "@types/minimist": "1.2.5",
     "@types/node": "24.5.2",
     "@types/uuid": "10.0.0",
     "@typescript-eslint/eslint-plugin": "8.44.0",
@@ -73,6 +68,7 @@
     "prettier": "3.6.2",
     "ts-node": "10.9.2",
     "typescript": "5.9.2",
+    "vite-tsconfig-paths": "^5.1.4",
     "vitest": "3.2.4"
   }
 }
