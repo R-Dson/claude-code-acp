@@ -11,7 +11,6 @@ import {
   TerminalExitStatus,
 } from "@zed-industries/agent-client-protocol";
 import * as diff from "diff";
-import type { Request, Response } from "express";
 
 import { sleep, unreachable, extractLinesWithByteLimit } from "./utils.js";
 
