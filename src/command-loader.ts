@@ -25,27 +25,30 @@ function parseFrontmatter(content: string): { [key: string]: string } {
 
 export async function loadAvailableCommands(cwd: string): Promise<AvailableCommand[]> {
   const builtInCommands: AvailableCommand[] = [
-    { name: "compact", description: "Compact the current session. Alias: /summarize", input: { hint: "<optional custom summarization instructions>" } },
+    { name: "compact", description: "Compact the current session.", input: { hint: "<optional custom summarization instructions>" } },
     { name: "summarize", description: "Alias for /compact", input: { hint: "<optional custom summarization instructions>" } },
-    { name: "details", description: "Toggle tool execution details.", input: null },
-    { name: "editor", description: "Open external editor for composing messages.", input: null },
-    { name: "exit", description: "Exit opencode. Aliases: /quit, /q", input: null },
-    { name: "quit", description: "Alias for /exit", input: null },
-    { name: "q", description: "Alias for /exit", input: null },
-    { name: "export", description: "Export current conversation to Markdown and open in your default editor.", input: null },
     { name: "help", description: "Show the help dialog.", input: null },
     { name: "init", description: "Create or update AGENTS.md file.", input: null },
     { name: "models", description: "List available models.", input: null },
-    { name: "new", description: "Start a new session. Alias: /clear", input: null },
-    { name: "clear", description: "Alias for /new", input: null },
     { name: "redo", description: "Redo a previously undone message.", input: null },
-    { name: "sessions", description: "List and switch between sessions. Aliases: /resume, /continue", input: null },
-    { name: "resume", description: "Alias for /sessions", input: null },
-    { name: "continue", description: "Alias for /sessions", input: null },
-    { name: "share", description: "Share current session.", input: null },
-    { name: "themes", description: "List available themes.", input: null },
     { name: "undo", description: "Undo last message in the conversation.", input: null },
-    { name: "unshare", description: "Unshare current session.", input: null },
+    { name: "share", description: "Share current session.", input: null },
+    { name: "unshare", "description": "Unshare current session.", input: null },
+
+    // not implemented or disabled commands
+    // { name: "new", description: "Start a new session. Alias: /clear", input: null },
+    // { name: "clear", description: "Alias for /new", input: null },
+    // { name: "sessions", description: "List and switch between sessions. Aliases: /resume, /continue (not implemented)", input: null },
+    // { name: "resume", description: "Alias for /sessions (not implemented)", input: null },
+    // { name: "continue", description: "Alias for /sessions (not implemented)", input: null },
+    // { name: "themes", description: "List available themes. (not implemented)", input: null },
+    // { name: "details", description: "Toggle tool execution details. (not implemented)", input: null },
+    // { name: "editor", description: "Open external editor for composing messages. (not implemented)", input: null },
+    // { name: "exit", description: "Exit opencode. Aliases: /quit, /q (not implemented)", input: null },
+    // { name: "quit", description: "Alias for /exit (not implemented)", input: null },
+    // { name: "q", description: "Alias for /exit (not implemented)", input: null },
+    // { name: "export", description: "Export current conversation to Markdown and open in your default editor. (not implemented)", input: null },
+
   ];
 
   const customCommands: AvailableCommand[] = [];

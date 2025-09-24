@@ -433,6 +433,16 @@ export class OpenCodeAcpAgent implements Agent {
     const session = this.sessions[params.sessionId];
     const opencodeClient = session.opencodeClient;
 
+    // Check for slash commands
+    const firstPart = params.prompt[0];
+    if (firstPart && firstPart.type === 'text' && firstPart.text.startsWith('/')) {
+      const [command, ...args] = firstPart.text.substring(1).split(' ');
+      const handled = await this.handleCommand(params.sessionId, command, args.join(' '));
+      if (handled) {
+        return { stopReason: "end_turn" };
+      }
+    }
+
     // Convert ACP prompt to Opencode prompt parts
     const opencodePromptParts: (TextPartInput | FilePartInput)[] = params.prompt.map(
       (part: ContentBlock) => {
@@ -716,8 +726,267 @@ export class OpenCodeAcpAgent implements Agent {
     delete this.backgroundTerminals[params.terminalId];
     return {};
   }
-}
 
+  private async getModelInfo(opencodeClient: ReturnType<typeof createOpencodeClient>, sessionId: string): Promise<{ providerID: string, modelID: string }> {
+    // First, try to get from the last assistant message
+    const { data: messages, error: messagesError } = await opencodeClient.session.messages({ path: { id: sessionId } });
+    if (!messagesError && messages && messages.length > 0) {
+      const lastAssistantMessage = messages.filter(m => m.info.role === 'assistant').pop()?.info as AssistantMessage | undefined;
+      if (lastAssistantMessage && lastAssistantMessage.providerID && lastAssistantMessage.modelID) {
+        return { providerID: lastAssistantMessage.providerID, modelID: lastAssistantMessage.modelID };
+      }
+    }
+
+    // Second, try to get the default model from the main config
+    const { data: config, error: configError } = await opencodeClient.config.get();
+    if (!configError && config && config.model) {
+      const [providerID, modelID] = config.model.split('/');
+      if (providerID && modelID) {
+        return { providerID, modelID };
+      }
+    }
+
+    // Third, try to get the first available model from providers
+    const { data: providersData, error: providersError } = await opencodeClient.config.providers();
+    if (!providersError && providersData && providersData.providers.length > 0) {
+      const firstProvider = providersData.providers[0];
+      const firstModelId = Object.keys(firstProvider.models)[0];
+      if (firstProvider && firstModelId) {
+        return { providerID: firstProvider.id, modelID: firstModelId };
+      }
+    }
+
+    throw new Error("Could not determine a model to use.");
+  }
+
+  async handleCommand(sessionId: string, command: string, args: string): Promise<boolean> {
+    const session = this.sessions[sessionId];
+    if (!session) return false;
+
+    const { opencodeClient } = session;
+
+    switch (command) {
+      case "help": {
+        const helpMessage = `
+Available slash commands:
+- /init: Analyze project structure and create/update AGENTS.md.
+- /models: List all available models from configured providers.
+- /compact or /summarize: Compact the current session.
+- /undo: Undo the last message and any associated file changes.
+- /redo: Redo a previously undone message and restore file changes.
+- /share: Share the current session.
+- /unshare: Unshare the current session.
+
+For more detailed information on all commands, including client-side commands and keybinds, please run 'opencode' in your terminal and use the '/help' command within the OpenCode TUI.
+`;
+        await this.client.sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: helpMessage },
+          },
+        });
+        return true;
+      }
+      
+      case "models": {
+        const { data, error } = await opencodeClient.config.providers();
+        if (error || !data) {
+          console.error("Error fetching models:", error);
+          return true;
+        }
+        let modelList = "Available models:\n";
+        for (const provider of data.providers) {
+          for (const modelId in provider.models) {
+            modelList += `- ${provider.id}/${modelId}\n`;
+          }
+        }
+        await this.client.sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: modelList },
+          },
+        });
+        return true;
+      }
+
+      case "compact":
+      case "summarize": {
+        try {
+          const { providerID, modelID } = await this.getModelInfo(opencodeClient, sessionId);
+          await opencodeClient.session.summarize({
+            path: { id: sessionId },
+            body: {
+              providerID,
+              modelID,
+            },
+          });
+        } catch (error) {
+          console.error("Error during /compact or /summarize command:", error);
+          await this.client.sessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: `❌ Error: ${error instanceof Error ? error.message : 'Unknown error'}\n\nCould not compact the session.` },
+            },
+          });
+        }
+        return true;
+      }
+
+      case "init": {
+        // Send a processing message to the user
+        await this.client.sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "🔍 Analyzing project structure and creating AGENTS.md file...\n" },
+          },
+        });
+        
+        try {
+          const { providerID, modelID } = await this.getModelInfo(opencodeClient, sessionId);
+          
+          // Generate a temporary, client-side message ID for this operation
+          const tempMessageID = `temp_init_${Date.now()}`;
+          
+          const response = await opencodeClient.session.init({
+            path: { id: sessionId },
+            body: {
+              messageID: tempMessageID,
+              providerID,
+              modelID,
+            }
+          });
+          
+          if (!response.error) {
+            await this.client.sessionUpdate({
+              sessionId,
+              update: {
+                sessionUpdate: "agent_message_chunk",
+                content: { type: "text", text: "✅ The AGENTS.md file has been created to help me understand your project structure and coding standards." },
+              },
+            });
+          } else {
+            await this.client.sessionUpdate({
+              sessionId,
+              update: {
+                sessionUpdate: "agent_message_chunk",
+                content: { type: "text", text: `❌ Error during project analysis: ${JSON.stringify(response.error)}. The AGENTS.md file may not have been created or updated.` },
+              },
+            });
+          }
+        } catch (error) {
+          console.error("Error during /init command:", error);
+          await this.client.sessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: `❌ Error: ${error instanceof Error ? error.message : 'Unknown error'}\n\nPlease try again or check your project structure.` },
+            },
+          });
+        }
+        
+        return true;
+      }
+
+      case "new":
+      case "clear":
+        // This is a client-side command in the TUI. The agent cannot create a new session for the client.
+        await this.client.sessionUpdate({
+          sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "The `/new` and `/clear` commands are used to start a new session in the OpenCode TUI. This agent does not support session management on behalf of the client." },
+          },
+        });
+        return true;
+
+      case "redo": {
+        try {
+          await opencodeClient.session.unrevert({ path: { id: sessionId } });
+          await this.client.sessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "✅ Last action has been redone." },
+            },
+          });
+        } catch (error) {
+          console.error("Error during /redo command:", error);
+          await this.client.sessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: `❌ Error redoing last action: ${error instanceof Error ? error.message : 'Unknown error'}` },
+            },
+          });
+        }
+        return true;
+      }
+      
+      case "share": {
+        await opencodeClient.session.share({ path: { id: sessionId } });
+        return true;
+      }
+
+      case "undo": {
+        try {
+          const { data: messages, error: messagesError } = await opencodeClient.session.messages({ path: { id: sessionId } });
+          if (messagesError || !messages || messages.length === 0) {
+            const errorDetails = messagesError ? JSON.stringify(messagesError) : "no messages found";
+            throw new Error(`Could not retrieve message history to undo: ${errorDetails}`);
+          }
+
+          const lastMessage = messages[messages.length - 1];
+          if (!lastMessage) {
+            throw new Error("No last message found to undo.");
+          }
+
+          await opencodeClient.session.revert({
+            path: { id: sessionId },
+            body: { messageID: lastMessage.info.id },
+          });
+
+          await this.client.sessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "✅ Last message has been undone." },
+            },
+          });
+        } catch (error) {
+          console.error("Error during /undo command:", error);
+          await this.client.sessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: `❌ Error undoing last message: ${error instanceof Error ? error.message : 'Unknown error'}` },
+            },
+          });
+        }
+        return true;
+      }
+
+      case "unshare": {
+        await opencodeClient.session.unshare({ path: { id: sessionId } });
+        return true;
+      }
+
+      default:
+        // Assume it's a custom command
+        await opencodeClient.session.command({
+          path: { id: sessionId },
+          body: {
+            command: command,
+            arguments: args,
+          },
+        });
+        return true;
+    }
+  }
+}
 
 export function toAcpNotifications(
   // messageInfo is now primarily for error handling, or specific message-level properties
