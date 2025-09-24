@@ -132,7 +132,7 @@ export function toolInfoFromToolUse(
         title: `List the ${input?.path ? "`" + input.path + "`" : "current"} directory's contents`,
         kind: "search",
         content: [],
-        locations: [],
+        locations: input?.path ? [{ path: input.path }] : [],
       };
 
     case toolNames.edit:

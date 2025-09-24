@@ -6,6 +6,8 @@ import {
   ClientCapabilities,
   InitializeRequest,
   InitializeResponse,
+  LoadSessionRequest,
+  LoadSessionResponse,
   ndJsonStream,
   NewSessionRequest,
   NewSessionResponse,
@@ -19,8 +21,16 @@ import {
   WriteTextFileResponse,
   ContentBlock,
   SessionNotification,
-  TerminalHandle, // Import TerminalHandle from ACP
   TerminalOutputResponse,
+  CreateTerminalRequest,
+  CreateTerminalResponse,
+  TerminalOutputRequest,
+  WaitForTerminalExitRequest,
+  WaitForTerminalExitResponse,
+  KillTerminalCommandRequest,
+  KillTerminalResponse,
+  ReleaseTerminalRequest,
+  ReleaseTerminalResponse,
 } from "@zed-industries/agent-client-protocol";
 
 // Define StopReason locally as it's not exported as a type from the ACP protocol library
@@ -37,13 +47,13 @@ import {
   EventMessageUpdated,
 } from "@opencode-ai/sdk";
 import { nodeToWebReadable, nodeToWebWritable, Pushable } from "./utils.js";
+import { loadAvailableCommands } from "./command-loader.js";
 
-// Use the imported TerminalHandle type
 type BackgroundTerminal = {
-  handle: TerminalHandle;
-  lastOutput: TerminalOutputResponse | null;
+  shellId: string;
+  output: string;
+  exitStatus: { exitCode: number | null; signal: string | null } | null;
   status: "started" | "aborted" | "exited" | "killed" | "timedOut";
-  pendingOutput?: TerminalOutputResponse;
 };
 
 // Define local enums for ToolCallStatus and ToolKind based on ACP schema
@@ -66,6 +76,26 @@ enum ToolKind {
   SwitchMode = "switch_mode",
   Other = "other",
 }
+
+// Define PlanEntry types for structured plan updates
+enum PlanEntryPriority {
+  High = "high",
+  Medium = "medium",
+  Low = "low",
+}
+
+enum PlanEntryStatus {
+  Pending = "pending",
+  InProgress = "in_progress",
+  Completed = "completed",
+}
+
+type PlanEntry = {
+  content: string;
+  priority: PlanEntryPriority;
+  status: PlanEntryStatus;
+};
+
 
 type Session = {
   input: Pushable<UserMessage>;
@@ -211,6 +241,7 @@ export class OpenCodeAcpAgent implements Agent {
                   title: tool,
                   status: ToolCallStatus.Pending,
                   kind: mapToolKind(tool),
+                  content: (part as any).content || [],
                 },
               });
 
@@ -261,6 +292,7 @@ export class OpenCodeAcpAgent implements Agent {
                     title: tool,
                     status: ToolCallStatus.Pending,
                     kind: mapToolKind(tool),
+                    content: (part as any).content || [],
                   },
                 });
               }
@@ -303,7 +335,13 @@ export class OpenCodeAcpAgent implements Agent {
           http: true,
           sse: false,
         },
-        loadSession: false,
+        loadSession: true,
+        _meta: {
+          "opencode.dev": {
+            "slashCommands": true,
+            "extensible": true,
+          },
+        },
       },
       authMethods: [],
     };
@@ -331,15 +369,18 @@ export class OpenCodeAcpAgent implements Agent {
       lastSentTextByMessagePartId: new Map<string, string>(), // Initialize the map
     };
 
-    // Since getAvailableSlashCommands is commented out, we send an empty array.
-    // If it were active, we would call it here.
-    this.client.sessionUpdate({
-      sessionId,
-      update: {
-        sessionUpdate: "available_commands_update",
-        availableCommands: [],
-      },
-    });
+    // Fetch and send available slash commands
+    // Add a delay to allow the server to initialize before fetching commands
+    setTimeout(async () => {
+      const availableCommands = await loadAvailableCommands(params.cwd);
+      this.client.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: "available_commands_update",
+          availableCommands,
+        },
+      });
+    }, 250);
 
     console.error(`[newSession] Created session ID: ${sessionId}`);
     console.error(`[newSession] Returning modes for session ID: ${sessionId}`);
@@ -398,13 +439,24 @@ export class OpenCodeAcpAgent implements Agent {
         switch (part.type) {
           case "text":
             return { type: "text", text: part.text };
-          case "resource_link":
-            return { type: "text", text: `Resource Link: ${part.uri} (${part.name})` };
+          case "resource_link": {
+            let linkText = `Resource Link: ${part.name} (${part.uri})`;
+            if (part.description) {
+              linkText += ` - ${part.description}`;
+            }
+            if (part.size) {
+              linkText += ` [${part.size} bytes]`;
+            }
+            return { type: "text", text: linkText };
+          }
           case "resource":
             if ("text" in part.resource) {
-              return { type: "text", text: part.resource.text };
+              return { type: "text", text: `Resource ${part.resource.uri}: ${part.resource.text}` };
             }
-            return { type: "text", text: `Binary Resource: ${part.resource.uri}` };
+            return {
+              type: "text",
+              text: `Binary Resource: ${part.resource.uri} (MIME: ${part.resource.mimeType || "unknown"})`,
+            };
           case "image":
             return {
               type: "file",
@@ -495,37 +547,177 @@ export class OpenCodeAcpAgent implements Agent {
   async writeTextFile(params: WriteTextFileRequest): Promise<WriteTextFileResponse> {
     return this.client.writeTextFile(params);
   }
+
+  async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
+    // Verify the session exists
+    const { data: sessionData, error: sessionError } = await this.opencodeClient.session.get({
+      path: { id: params.sessionId },
+    });
+
+    if (sessionError || !sessionData) {
+      const errorDetails = sessionError ? JSON.stringify(sessionError) : "undefined response";
+      throw new Error(`Failed to verify opencode session: ${errorDetails}`);
+    }
+
+    // Create and store a new Session object
+    const input = new Pushable<UserMessage>();
+    this.sessions[params.sessionId] = {
+      input: input,
+      cancelled: false,
+      permissionMode: "default",
+      opencodeClient: this.opencodeClient,
+      lastSentTextByMessagePartId: new Map<string, string>(), // Initialize the map
+    };
+
+    // Fetch the conversation history
+    const { data: messagesData, error: messagesError } = await this.opencodeClient.session.messages({
+      path: { id: params.sessionId },
+    });
+
+    if (messagesError || !messagesData) {
+      const errorDetails = messagesError ? JSON.stringify(messagesError) : "undefined response";
+      throw new Error(`Failed to fetch conversation history: ${errorDetails}`);
+    }
+
+    // Replay the conversation history
+    for (const message of messagesData) {
+      // Handle user messages
+      if (message.info.role === "user") {
+        for (const part of message.parts) {
+          if (part.type === "text") {
+            await this.client.sessionUpdate({
+              sessionId: params.sessionId,
+              update: {
+                sessionUpdate: "user_message_chunk",
+                content: { type: "text", text: part.text },
+              },
+            });
+          }
+          // Note: Other part types for user messages could be handled here if needed
+        }
+      }
+      // Handle assistant messages
+      else if (message.info.role === "assistant") {
+        for (const part of message.parts) {
+          const notifications = toAcpNotifications(message.info as AssistantMessage, part, params.sessionId);
+          for (const notification of notifications) {
+            await this.client.sessionUpdate(notification);
+          }
+        }
+      }
+    }
+
+    // Return the LoadSessionResponse with mode state
+    return {
+      modes: {
+        currentModeId: "default",
+        availableModes: [
+          {
+            id: "default",
+            name: "Always Ask",
+            description: "Prompts for permission on first use of each tool",
+          },
+          {
+            id: "acceptEdits",
+            name: "Accept Edits",
+            description: "Automatically accepts file edit permissions for the session",
+          },
+          {
+            id: "bypassPermissions",
+            name: "Bypass Permissions",
+            description: "Skips all permission prompts",
+          },
+          {
+            id: "plan",
+            name: "Plan Mode",
+            description: "Claude can analyze but not modify files or execute commands",
+          },
+        ],
+      },
+    };
+  }
+
+  async createTerminal(params: CreateTerminalRequest): Promise<CreateTerminalResponse> {
+    const terminalId = `term_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    try {
+      // Construct the full command string
+      const fullCommand = params.args ? `${params.command} ${params.args.join(' ')}` : params.command;
+
+      const { data: shellData, error: shellError } = await this.opencodeClient.session.shell({
+        path: { id: params.sessionId },
+        body: {
+          agent: "terminal",
+          command: fullCommand,
+        },
+      });
+
+      if (shellError || !shellData || !shellData.id) {
+        const errorDetails = shellError ? JSON.stringify(shellError) : "undefined shell data";
+        throw new Error(`Failed to create terminal: ${errorDetails}`);
+      }
+
+      // Store the terminal in backgroundTerminals
+      this.backgroundTerminals[terminalId] = {
+        shellId: shellData.id,
+        output: "", // Initialize with empty output
+        exitStatus: null, // Initialize with null exit status
+        status: "started",
+      };
+
+      return { terminalId };
+    } catch (error) {
+      throw new Error(`Failed to create terminal: ${error}`);
+    }
+  }
+
+  async terminalOutput(params: TerminalOutputRequest): Promise<TerminalOutputResponse> {
+    const terminal = this.backgroundTerminals[params.terminalId];
+    if (!terminal) {
+      throw new Error(`Terminal not found: ${params.terminalId}`);
+    }
+    return {
+      output: terminal.output,
+      truncated: false,
+      exitStatus: terminal.exitStatus,
+    };
+  }
+
+  async waitForTerminalExit(params: WaitForTerminalExitRequest): Promise<WaitForTerminalExitResponse> {
+    const terminal = this.backgroundTerminals[params.terminalId];
+    if (!terminal) {
+      throw new Error(`Terminal not found: ${params.terminalId}`);
+    }
+    while (terminal.status === "started") {
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    return {
+      exitCode: terminal.exitStatus?.exitCode ?? null,
+      signal: terminal.exitStatus?.signal ?? null,
+    };
+  }
+
+  async "terminal/kill"(params: KillTerminalCommandRequest): Promise<KillTerminalResponse> {
+    const terminal = this.backgroundTerminals[params.terminalId];
+    if (!terminal) {
+      throw new Error(`Terminal not found: ${params.terminalId}`);
+    }
+    console.warn("SDK does not support killing terminals directly. Marking as killed.");
+    terminal.status = "killed";
+    return {};
+  }
+
+  async releaseTerminal(params: ReleaseTerminalRequest): Promise<ReleaseTerminalResponse> {
+    const terminal = this.backgroundTerminals[params.terminalId];
+    if (!terminal) {
+      throw new Error(`Terminal not found: ${params.terminalId}`);
+    }
+    console.warn("SDK does not support releasing terminals directly. Deleting internal reference.");
+    delete this.backgroundTerminals[params.terminalId];
+    return {};
+  }
 }
 
-// async function getAvailableSlashCommands(opencodeClient: ReturnType<typeof createOpencodeClient>): Promise<AvailableCommand[]> {
-//   const UNSUPPORTED_COMMANDS = [
-//     "add-dir", "agents", "bashes", "bug", "clear", "config", "context", "cost",
-//     "doctor", "exit", "export", "help", "hooks", "ide", "install-github-app",
-//     "login", "logout", "memory", "mcp", "migrate-installer", "output-style",
-//     "output-style:new", "permissions", "privacy-settings", "release-notes",
-//     "resume", "status", "statusline", "terminal-setup", "todos", "vim",
-//     "run", "serve", "upgrade",
-//   ];
-//
-//   try {
-//     const response = await opencodeClient.command.list();
-//     if (!response.data) {
-//       return [];
-//     }
-//     return response.data
-//       .map((command: any) => ({
-//         name: command.name,
-//         description: command.description || "",
-//         input: command.inputHint ? { hint: command.inputHint } : null,
-//       }))
-//       .filter((command: AvailableCommand) =>
-//         !(command.name.match(/\(MCP\)/) || UNSUPPORTED_COMMANDS.includes(command.name))
-//       );
-//   } catch (error) {
-//     console.error("Error fetching available commands from Opencode SDK:", error);
-//     return [];
-//   }
-// }
 
 export function toAcpNotifications(
   // messageInfo is now primarily for error handling, or specific message-level properties
@@ -554,6 +746,8 @@ export function toAcpNotifications(
           title: tool,
           status: ToolCallStatus.Pending,
           kind: mapToolKind(tool),
+          content: (messagePart as any).content || [],
+          locations: (messagePart as any).locations || [],
         };
       } else if (state.status === "running") {
         update = {
@@ -561,6 +755,7 @@ export function toAcpNotifications(
           toolCallId: callID,
           title: state.title || tool,
           status: ToolCallStatus.InProgress,
+          locations: (messagePart as any).locations || [],
           content: [
             {
               type: "content",
@@ -569,14 +764,37 @@ export function toAcpNotifications(
           ],
         };
       } else if (state.status === "completed") {
-        update = {
-          sessionUpdate: "tool_call_update",
-          toolCallId: callID,
-          status: ToolCallStatus.Completed,
-          content: [
-            { type: "content", content: { type: "text", text: JSON.stringify(state.output) } },
-          ],
-        };
+        const toolKind = mapToolKind(tool);
+        if (
+          toolKind === ToolKind.Edit &&
+          state.output &&
+          typeof state.output === "object" &&
+          "path" in state.output &&
+          "newText" in state.output
+        ) {
+          update = {
+            sessionUpdate: "tool_call_update",
+            toolCallId: callID,
+            status: ToolCallStatus.Completed,
+            content: [
+              {
+                type: "diff",
+                path: (state.output as any).path,
+                oldText: (state.output as any).oldText ?? null,
+                newText: (state.output as any).newText,
+              },
+            ],
+          };
+        } else {
+          update = {
+            sessionUpdate: "tool_call_update",
+            toolCallId: callID,
+            status: ToolCallStatus.Completed,
+            content: [
+              { type: "content", content: { type: "text", text: JSON.stringify(state.output) } },
+            ],
+          };
+        }
       } else if (state.status === "error") {
         update = {
           sessionUpdate: "tool_call_update",
@@ -601,12 +819,20 @@ export function toAcpNotifications(
             },
       };
       break;
-    case "reasoning":
+    case "reasoning": {
+      // Create a plan entry for the reasoning part
+      const planEntry: PlanEntry = {
+        content: messagePart.text,
+        priority: PlanEntryPriority.Medium,
+        status: PlanEntryStatus.Pending,
+      };
+
       update = {
-        sessionUpdate: "agent_thought_chunk",
-        content: { type: "text", text: messagePart.text },
+        sessionUpdate: "plan",
+        entries: [planEntry],
       };
       break;
+    }
     case "patch":
       update = {
         sessionUpdate: "tool_call", // Or tool_call_update if it's an update to an existing one
