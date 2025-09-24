@@ -36,6 +36,12 @@ import {
 // Define StopReason locally as it's not exported as a type from the ACP protocol library
 type StopReason = "end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled";
 
+// Define TerminalExitStatus locally as it's not exported from the SDK
+type TerminalExitStatus = {
+  exitCode: number | null;
+  signal: string | null;
+};
+
 import {
   AssistantMessage,
   UserMessage,
@@ -50,10 +56,19 @@ import { nodeToWebReadable, nodeToWebWritable, Pushable } from "./utils.js";
 import { loadAvailableCommands } from "./command-loader.js";
 
 type BackgroundTerminal = {
+  handle: {
+    id: string;
+    currentOutput: () => Promise<TerminalOutputResponse>;
+    kill: () => Promise<KillTerminalResponse>;
+    release: () => Promise<ReleaseTerminalResponse>;
+    waitForExit: () => Promise<WaitForTerminalExitResponse>;
+  };
+  lastOutput: TerminalOutputResponse | null;
+  status: "started" | "aborted" | "exited" | "killed" | "timedOut";
+  pendingOutput?: TerminalOutputResponse;
   shellId: string;
   output: string;
-  exitStatus: { exitCode: number | null; signal: string | null } | null;
-  status: "started" | "aborted" | "exited" | "killed" | "timedOut";
+  exitStatus: TerminalExitStatus | null;
 };
 
 // Define local enums for ToolCallStatus and ToolKind based on ACP schema
@@ -674,12 +689,31 @@ export class OpenCodeAcpAgent implements Agent {
         throw new Error(`Failed to create terminal: ${errorDetails}`);
       }
 
-      // Store the terminal in backgroundTerminals
+      // Create a handle object that matches the expected interface
+      const handle = {
+        id: terminalId,
+        currentOutput: async (): Promise<TerminalOutputResponse> => {
+          return this.terminalOutput({ sessionId: params.sessionId, terminalId });
+        },
+        kill: async (): Promise<KillTerminalResponse> => {
+          return this["terminal/kill"]({ sessionId: params.sessionId, terminalId });
+        },
+        release: async (): Promise<ReleaseTerminalResponse> => {
+          return this.releaseTerminal({ sessionId: params.sessionId, terminalId });
+        },
+        waitForExit: async (): Promise<WaitForTerminalExitResponse> => {
+          return this.waitForTerminalExit({ sessionId: params.sessionId, terminalId });
+        },
+      };
+
+      // Store the terminal in backgroundTerminals with the handle
       this.backgroundTerminals[terminalId] = {
-        shellId: shellData.id,
-        output: "", // Initialize with empty output
-        exitStatus: null, // Initialize with null exit status
+        handle,
+        lastOutput: null,
         status: "started",
+        shellId: shellData.id,
+        output: "",
+        exitStatus: null,
       };
 
       return { terminalId };

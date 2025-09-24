@@ -322,7 +322,7 @@ describe("tool conversions", () => {
       kind: "search",
       title: "List the `/Users/test/github/claude-code-acp` directory's contents",
       content: [],
-      locations: [],
+      locations: [{ path: "/Users/test/github/claude-code-acp" }],
     });
   });
 

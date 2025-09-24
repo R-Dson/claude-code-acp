@@ -8,7 +8,7 @@ import { OpenCodeAcpAgent } from "./acp-agent.js";
 import {
   ClientCapabilities,
   TerminalOutputResponse,
-  TerminalExitStatus,
+  TerminalExitStatus
 } from "@zed-industries/agent-client-protocol";
 import * as diff from "diff";
 
@@ -427,11 +427,18 @@ export function createMcpServer(
           throw new Error("unreachable");
         }
 
-        const handle = await agent.client.createTerminal({
+        const response = await agent.createTerminal({
           command: input.command,
+          args: input.command.split(" ").slice(1),
           sessionId,
-          outputByteLimit: 32_000,
         });
+
+        const terminalId = response.terminalId;
+        const handle = agent.backgroundTerminals[terminalId]?.handle;
+
+        if (!handle) {
+          throw new Error("Terminal handle not found");
+        }
 
         await agent.client.sessionUpdate({
           sessionId,
@@ -439,7 +446,7 @@ export function createMcpServer(
             sessionUpdate: "tool_call_update",
             toolCallId,
             status: "in_progress",
-            content: [{ type: "terminal", terminalId: handle.id }],
+            content: [{ type: "terminal", terminalId: terminalId }],
           },
         });
 
@@ -459,7 +466,7 @@ export function createMcpServer(
             .then((exitStatus: TerminalExitStatus) => ({ status: "exited" as const, exitStatus })),
           abortPromise.then(() => ({ status: "aborted" as const, exitStatus: null })),
           sleep(input.timeout_ms).then(async () => {
-            if (agent.backgroundTerminals[handle.id]?.status === "started") {
+            if (agent.backgroundTerminals[terminalId]?.status === "started") {
               await handle.kill();
             }
             return { status: "timedOut" as const, exitStatus: null };
@@ -467,14 +474,17 @@ export function createMcpServer(
         ]);
 
         if (input.run_in_background) {
-          agent.backgroundTerminals[handle.id] = {
+          agent.backgroundTerminals[terminalId] = {
             handle,
             lastOutput: null,
             status: "started",
+            shellId: terminalId,
+            output: "",
+            exitStatus: null,
           };
 
           statusPromise.then(async ({ status, exitStatus }) => {
-            const bgTerm = agent.backgroundTerminals[handle.id];
+            const bgTerm = agent.backgroundTerminals[terminalId];
 
             if (bgTerm.status !== "started") {
               return;
@@ -482,7 +492,7 @@ export function createMcpServer(
 
             const currentOutput = await handle.currentOutput();
 
-            agent.backgroundTerminals[handle.id] = {
+            agent.backgroundTerminals[terminalId] = {
               handle: bgTerm.handle, // Keep the original handle
               lastOutput: bgTerm.lastOutput, // Keep the original lastOutput
               status,
@@ -491,6 +501,9 @@ export function createMcpServer(
                 output: stripCommonPrefix(bgTerm.lastOutput?.output ?? "", currentOutput.output),
                 exitStatus: exitStatus ?? currentOutput.exitStatus,
               },
+              shellId: bgTerm.shellId,
+              output: bgTerm.output,
+              exitStatus: bgTerm.exitStatus,
             };
 
             return handle.release();
@@ -500,23 +513,23 @@ export function createMcpServer(
             content: [
               {
                 type: "text",
-                text: `Command started in background with id: ${handle.id}`,
+                text: `Command started in background with id: ${terminalId}`,
               },
             ],
           };
         }
 
-        await using terminal = handle;
-
         const { status } = await statusPromise;
 
         if (status === "aborted") {
+          await handle.release();
           return {
             content: [{ type: "text", text: "Tool cancelled by user" }],
           };
         }
 
-        const output = await terminal.currentOutput();
+        const output = await handle.currentOutput();
+        await handle.release();
 
         return {
           content: [{ type: "text", text: toolCommandOutput(status, output) }],
@@ -605,6 +618,9 @@ export function createMcpServer(
                 ...currentOutput,
                 output: stripCommonPrefix(bgTerm.lastOutput?.output ?? "", currentOutput.output),
               },
+              shellId: bgTerm.shellId,
+              output: bgTerm.output,
+              exitStatus: bgTerm.exitStatus,
             };
             await bgTerm.handle.release();
 
