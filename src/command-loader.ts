@@ -8,12 +8,12 @@ function parseFrontmatter(content: string): { [key: string]: string } {
   const match = content.match(/^---\s*([\s\S]*?)\s*---/);
   if (match) {
     const frontmatterStr = match[1];
-    const lines = frontmatterStr.split('\n');
+    const lines = frontmatterStr.split("\n");
     for (const line of lines) {
-      const parts = line.split(':');
+      const parts = line.split(":");
       if (parts.length >= 2) {
         const key = parts[0].trim();
-        const value = parts.slice(1).join(':').trim();
+        const value = parts.slice(1).join(":").trim();
         if (key && value) {
           frontmatter[key] = value;
         }
@@ -25,15 +25,23 @@ function parseFrontmatter(content: string): { [key: string]: string } {
 
 export async function loadAvailableCommands(cwd: string): Promise<AvailableCommand[]> {
   const builtInCommands: AvailableCommand[] = [
-    { name: "compact", description: "Compact the current session.", input: { hint: "<optional custom summarization instructions>" } },
-    { name: "summarize", description: "Alias for /compact", input: { hint: "<optional custom summarization instructions>" } },
+    {
+      name: "compact",
+      description: "Compact the current session.",
+      input: { hint: "<optional custom summarization instructions>" },
+    },
+    {
+      name: "summarize",
+      description: "Alias for /compact",
+      input: { hint: "<optional custom summarization instructions>" },
+    },
     { name: "help", description: "Show the help dialog.", input: null },
     { name: "init", description: "Create or update AGENTS.md file.", input: null },
     { name: "models", description: "List available models.", input: null },
     { name: "redo", description: "Redo a previously undone message.", input: null },
     { name: "undo", description: "Undo last message in the conversation.", input: null },
     { name: "share", description: "Share current session.", input: null },
-    { name: "unshare", "description": "Unshare current session.", input: null },
+    { name: "unshare", description: "Unshare current session.", input: null },
 
     // not implemented or disabled commands
     // { name: "new", description: "Start a new session. Alias: /clear", input: null },
@@ -48,7 +56,6 @@ export async function loadAvailableCommands(cwd: string): Promise<AvailableComma
     // { name: "quit", description: "Alias for /exit (not implemented)", input: null },
     // { name: "q", description: "Alias for /exit (not implemented)", input: null },
     // { name: "export", description: "Export current conversation to Markdown and open in your default editor. (not implemented)", input: null },
-
   ];
 
   const customCommands: AvailableCommand[] = [];
@@ -59,7 +66,9 @@ export async function loadAvailableCommands(cwd: string): Promise<AvailableComma
   try {
     const configContent = await fs.readFile(configPath, "utf-8");
     // Strip comments from JSONC
-    const json = configContent.replace(/\\"|"(?:\\"|[^"])*"|(\/\/.*|\/\*[\s\S]*?\*\/)/g, (m, g) => g ? "" : m);
+    const json = configContent.replace(/\\"|"(?:\\"|[^"])*"|(\/\/.*|\/\*[\s\S]*?\*\/)/g, (m, g) =>
+      g ? "" : m,
+    );
     const config = JSON.parse(json);
 
     interface CommandDetails {
@@ -81,7 +90,7 @@ export async function loadAvailableCommands(cwd: string): Promise<AvailableComma
       }
     }
   } catch (error) {
-    if ((error as any).code !== 'ENOENT') {
+    if ((error as any).code !== "ENOENT") {
       console.error("Error reading opencode.json:", error);
     }
   }
@@ -97,7 +106,7 @@ export async function loadAvailableCommands(cwd: string): Promise<AvailableComma
           const filePath = path.join(projectCommandDir, file);
           const content = await fs.readFile(filePath, "utf-8");
           const frontmatter = parseFrontmatter(content);
-          const template = content.replace(/^---[\s\S]*?---/, '').trim();
+          const template = content.replace(/^---[\s\S]*?---/, "").trim();
 
           customCommands.push({
             name: commandName,
@@ -109,13 +118,16 @@ export async function loadAvailableCommands(cwd: string): Promise<AvailableComma
       }
     }
   } catch (error) {
-    if ((error as any).code !== 'ENOENT') {
+    if ((error as any).code !== "ENOENT") {
       console.error("Error reading project command directory:", error);
     }
   }
 
   // Merge built-in and custom commands, with custom commands overriding built-in ones.
-  const finalCommands = [...builtInCommands.filter(c => !customCommandNames.has(c.name)), ...customCommands];
+  const finalCommands = [
+    ...builtInCommands.filter((c) => !customCommandNames.has(c.name)),
+    ...customCommands,
+  ];
 
   return finalCommands;
 }

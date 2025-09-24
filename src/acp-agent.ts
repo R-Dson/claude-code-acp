@@ -96,7 +96,6 @@ type PlanEntry = {
   status: PlanEntryStatus;
 };
 
-
 type Session = {
   input: Pushable<UserMessage>;
   cancelled: boolean;
@@ -338,8 +337,8 @@ export class OpenCodeAcpAgent implements Agent {
         loadSession: true,
         _meta: {
           "opencode.dev": {
-            "slashCommands": true,
-            "extensible": true,
+            slashCommands: true,
+            extensible: true,
           },
         },
       },
@@ -435,9 +434,9 @@ export class OpenCodeAcpAgent implements Agent {
 
     // Check for slash commands
     const firstPart = params.prompt[0];
-    if (firstPart && firstPart.type === 'text' && firstPart.text.startsWith('/')) {
-      const [command, ...args] = firstPart.text.substring(1).split(' ');
-      const handled = await this.handleCommand(params.sessionId, command, args.join(' '));
+    if (firstPart && firstPart.type === "text" && firstPart.text.startsWith("/")) {
+      const [command, ...args] = firstPart.text.substring(1).split(" ");
+      const handled = await this.handleCommand(params.sessionId, command, args.join(" "));
       if (handled) {
         return { stopReason: "end_turn" };
       }
@@ -580,9 +579,11 @@ export class OpenCodeAcpAgent implements Agent {
     };
 
     // Fetch the conversation history
-    const { data: messagesData, error: messagesError } = await this.opencodeClient.session.messages({
-      path: { id: params.sessionId },
-    });
+    const { data: messagesData, error: messagesError } = await this.opencodeClient.session.messages(
+      {
+        path: { id: params.sessionId },
+      },
+    );
 
     if (messagesError || !messagesData) {
       const errorDetails = messagesError ? JSON.stringify(messagesError) : "undefined response";
@@ -609,7 +610,11 @@ export class OpenCodeAcpAgent implements Agent {
       // Handle assistant messages
       else if (message.info.role === "assistant") {
         for (const part of message.parts) {
-          const notifications = toAcpNotifications(message.info as AssistantMessage, part, params.sessionId);
+          const notifications = toAcpNotifications(
+            message.info as AssistantMessage,
+            part,
+            params.sessionId,
+          );
           for (const notification of notifications) {
             await this.client.sessionUpdate(notification);
           }
@@ -652,7 +657,9 @@ export class OpenCodeAcpAgent implements Agent {
 
     try {
       // Construct the full command string
-      const fullCommand = params.args ? `${params.command} ${params.args.join(' ')}` : params.command;
+      const fullCommand = params.args
+        ? `${params.command} ${params.args.join(" ")}`
+        : params.command;
 
       const { data: shellData, error: shellError } = await this.opencodeClient.session.shell({
         path: { id: params.sessionId },
@@ -693,13 +700,15 @@ export class OpenCodeAcpAgent implements Agent {
     };
   }
 
-  async waitForTerminalExit(params: WaitForTerminalExitRequest): Promise<WaitForTerminalExitResponse> {
+  async waitForTerminalExit(
+    params: WaitForTerminalExitRequest,
+  ): Promise<WaitForTerminalExitResponse> {
     const terminal = this.backgroundTerminals[params.terminalId];
     if (!terminal) {
       throw new Error(`Terminal not found: ${params.terminalId}`);
     }
     while (terminal.status === "started") {
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
     return {
       exitCode: terminal.exitStatus?.exitCode ?? null,
@@ -727,20 +736,29 @@ export class OpenCodeAcpAgent implements Agent {
     return {};
   }
 
-  private async getModelInfo(opencodeClient: ReturnType<typeof createOpencodeClient>, sessionId: string): Promise<{ providerID: string, modelID: string }> {
+  private async getModelInfo(
+    opencodeClient: ReturnType<typeof createOpencodeClient>,
+    sessionId: string,
+  ): Promise<{ providerID: string; modelID: string }> {
     // First, try to get from the last assistant message
-    const { data: messages, error: messagesError } = await opencodeClient.session.messages({ path: { id: sessionId } });
+    const { data: messages, error: messagesError } = await opencodeClient.session.messages({
+      path: { id: sessionId },
+    });
     if (!messagesError && messages && messages.length > 0) {
-      const lastAssistantMessage = messages.filter(m => m.info.role === 'assistant').pop()?.info as AssistantMessage | undefined;
+      const lastAssistantMessage = messages.filter((m) => m.info.role === "assistant").pop()
+        ?.info as AssistantMessage | undefined;
       if (lastAssistantMessage && lastAssistantMessage.providerID && lastAssistantMessage.modelID) {
-        return { providerID: lastAssistantMessage.providerID, modelID: lastAssistantMessage.modelID };
+        return {
+          providerID: lastAssistantMessage.providerID,
+          modelID: lastAssistantMessage.modelID,
+        };
       }
     }
 
     // Second, try to get the default model from the main config
     const { data: config, error: configError } = await opencodeClient.config.get();
     if (!configError && config && config.model) {
-      const [providerID, modelID] = config.model.split('/');
+      const [providerID, modelID] = config.model.split("/");
       if (providerID && modelID) {
         return { providerID, modelID };
       }
@@ -788,7 +806,7 @@ For more detailed information on all commands, including client-side commands an
         });
         return true;
       }
-      
+
       case "models": {
         const { data, error } = await opencodeClient.config.providers();
         if (error || !data) {
@@ -828,7 +846,10 @@ For more detailed information on all commands, including client-side commands an
             sessionId,
             update: {
               sessionUpdate: "agent_message_chunk",
-              content: { type: "text", text: `❌ Error: ${error instanceof Error ? error.message : 'Unknown error'}\n\nCould not compact the session.` },
+              content: {
+                type: "text",
+                text: `❌ Error: ${error instanceof Error ? error.message : "Unknown error"}\n\nCould not compact the session.`,
+              },
             },
           });
         }
@@ -841,31 +862,37 @@ For more detailed information on all commands, including client-side commands an
           sessionId,
           update: {
             sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: "🔍 Analyzing project structure and creating AGENTS.md file...\n" },
+            content: {
+              type: "text",
+              text: "🔍 Analyzing project structure and creating AGENTS.md file...\n",
+            },
           },
         });
-        
+
         try {
           const { providerID, modelID } = await this.getModelInfo(opencodeClient, sessionId);
-          
+
           // Generate a temporary, client-side message ID for this operation
           const tempMessageID = `temp_init_${Date.now()}`;
-          
+
           const response = await opencodeClient.session.init({
             path: { id: sessionId },
             body: {
               messageID: tempMessageID,
               providerID,
               modelID,
-            }
+            },
           });
-          
+
           if (!response.error) {
             await this.client.sessionUpdate({
               sessionId,
               update: {
                 sessionUpdate: "agent_message_chunk",
-                content: { type: "text", text: "✅ The AGENTS.md file has been created to help me understand your project structure and coding standards." },
+                content: {
+                  type: "text",
+                  text: "✅ The AGENTS.md file has been created to help me understand your project structure and coding standards.",
+                },
               },
             });
           } else {
@@ -873,7 +900,10 @@ For more detailed information on all commands, including client-side commands an
               sessionId,
               update: {
                 sessionUpdate: "agent_message_chunk",
-                content: { type: "text", text: `❌ Error during project analysis: ${JSON.stringify(response.error)}. The AGENTS.md file may not have been created or updated.` },
+                content: {
+                  type: "text",
+                  text: `❌ Error during project analysis: ${JSON.stringify(response.error)}. The AGENTS.md file may not have been created or updated.`,
+                },
               },
             });
           }
@@ -883,11 +913,14 @@ For more detailed information on all commands, including client-side commands an
             sessionId,
             update: {
               sessionUpdate: "agent_message_chunk",
-              content: { type: "text", text: `❌ Error: ${error instanceof Error ? error.message : 'Unknown error'}\n\nPlease try again or check your project structure.` },
+              content: {
+                type: "text",
+                text: `❌ Error: ${error instanceof Error ? error.message : "Unknown error"}\n\nPlease try again or check your project structure.`,
+              },
             },
           });
         }
-        
+
         return true;
       }
 
@@ -898,7 +931,10 @@ For more detailed information on all commands, including client-side commands an
           sessionId,
           update: {
             sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: "The `/new` and `/clear` commands are used to start a new session in the OpenCode TUI. This agent does not support session management on behalf of the client." },
+            content: {
+              type: "text",
+              text: "The `/new` and `/clear` commands are used to start a new session in the OpenCode TUI. This agent does not support session management on behalf of the client.",
+            },
           },
         });
         return true;
@@ -919,13 +955,16 @@ For more detailed information on all commands, including client-side commands an
             sessionId,
             update: {
               sessionUpdate: "agent_message_chunk",
-              content: { type: "text", text: `❌ Error redoing last action: ${error instanceof Error ? error.message : 'Unknown error'}` },
+              content: {
+                type: "text",
+                text: `❌ Error redoing last action: ${error instanceof Error ? error.message : "Unknown error"}`,
+              },
             },
           });
         }
         return true;
       }
-      
+
       case "share": {
         await opencodeClient.session.share({ path: { id: sessionId } });
         return true;
@@ -933,9 +972,13 @@ For more detailed information on all commands, including client-side commands an
 
       case "undo": {
         try {
-          const { data: messages, error: messagesError } = await opencodeClient.session.messages({ path: { id: sessionId } });
+          const { data: messages, error: messagesError } = await opencodeClient.session.messages({
+            path: { id: sessionId },
+          });
           if (messagesError || !messages || messages.length === 0) {
-            const errorDetails = messagesError ? JSON.stringify(messagesError) : "no messages found";
+            const errorDetails = messagesError
+              ? JSON.stringify(messagesError)
+              : "no messages found";
             throw new Error(`Could not retrieve message history to undo: ${errorDetails}`);
           }
 
@@ -962,7 +1005,10 @@ For more detailed information on all commands, including client-side commands an
             sessionId,
             update: {
               sessionUpdate: "agent_message_chunk",
-              content: { type: "text", text: `❌ Error undoing last message: ${error instanceof Error ? error.message : 'Unknown error'}` },
+              content: {
+                type: "text",
+                text: `❌ Error undoing last message: ${error instanceof Error ? error.message : "Unknown error"}`,
+              },
             },
           });
         }
