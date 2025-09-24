@@ -8,7 +8,7 @@ import { OpenCodeAcpAgent } from "./acp-agent.js";
 import {
   ClientCapabilities,
   TerminalOutputResponse,
-  TerminalExitStatus
+  TerminalExitStatus,
 } from "@zed-industries/agent-client-protocol";
 import * as diff from "diff";
 
