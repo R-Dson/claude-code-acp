@@ -1,37 +1,43 @@
-# ACP adapter for Opencode
+# OpenCode ACP Adapter
 
-This tool implements an ACP agent for [Opencode](https://github.com/sst/opencode), allowing you to use Opencode from [ACP-compatible](https://agentclientprotocol.com) clients such as [Zed](https://zed.dev)!
+A robust ACP (Agent Client Protocol) adapter that bridges [OpenCode](https://github.com/sst/opencode) with ACP-compatible clients like [Zed](https://zed.dev). This adapter uses the official [OpenCode SDK](https://opencode.ai/docs/sdk) to provide AI-powered coding assistance.
 
-It uses the official [Opencode SDK](https://opencode.ai/docs/sdk), supporting:
+## What This Does
 
-- Client MCP servers
+This adapter enables seamless integration between OpenCode and ACP-compatible editors. It translates between the two protocols, allowing you to use OpenCode's powerful AI capabilities directly within your editor.
 
-Learn more about the [Agent Client Protocol](https://agentclientprotocol.com/).
+The adapter provides real-time streaming responses, file operations, terminal integration, and a flexible permission system. It supports multiple operation modes ranging from fully interactive to analysis-only.
 
-## How to use
+## Key Features
 
-### Zed
+**Session Management**: Create, load, and manage coding sessions with full conversation history and context preservation.
 
-The latest version of Zed can already use this adapter out of the box.
+**File Operations**: Read, write, and edit files.
 
-To use Opencode, open the Agent Panel and click "New Opencode Thread" from the `+` button menu in the top-right:
+**Terminal Integration**: Execute bash commands with real-time output streaming. Run long-running processes in the background and manage them through the interface.
 
-https://github.com/user-attachments/assets/ddce66c7-79ac-47a3-ad59-4a6a3ca74903
+**Permission System**: Choose from different security levels - from always asking for permission to fully automated operation, plus a special planning mode for analysis without modifications.
 
-Read the docs on [External Agent](https://zed.dev/docs/ai/external-agents) support.
+**Custom Commands**: Use built-in commands like `/compact`, `/init`, `/models`, and `/help`, or define your own commands through configuration files.
 
-#### Installation
+## Installation
 
-Install the adapter from `npm`:
+### From source
 
 ```bash
-# Install dependencies
+git clone https://github.com/zed-industries/opencode-acp.git
+cd opencode-acp
 npm install
+npm run build
 ```
 
-## Adding as an Agent Server
+## Configuration
 
-To add this agent as a server in your environment, include the following configuration:
+### Zed Integration
+
+The latest version of Zed supports this adapter out of the box. Simply open the Agent Panel and click "New Opencode Thread" from the `+` button menu.
+
+For manual configuration, add this to your Zed settings:
 
 ```json
 {
@@ -44,6 +50,65 @@ To add this agent as a server in your environment, include the following configu
 }
 ```
 
+## Usage
+
+Start the adapter with `npm start`, then connect from your ACP-compatible client. You'll have access to AI-powered coding assistance with real-time responses.
+
+### Available Commands
+
+- `/help` - Show available commands
+- `/models` - List available AI models
+- `/init` - Analyze project and create AGENTS.md
+- `/compact` - Summarize current session
+- `/undo` - Undo last message
+- `/redo` - Redo last undone message
+- `/share` - Share current session
+- `/unshare` - Unshare current session
+
+### Permission Modes
+
+The adapter offers several permission modes to suit different workflows:
+
+- **Default Mode**: Prompts for each tool usage
+- **Accept Edits**: Auto-approves file modifications
+- **Bypass Permissions**: No prompts (use with caution)
+- **Plan Mode**: Analysis only, no file changes
+
+## Development
+
+### Architecture
+
+The adapter consists of several key components:
+
+- **ACP Agent** (`acp-agent.ts`): Main protocol implementation with session management
+- **MCP Server** (`mcp-server.ts`): Provides file and terminal operations
+- **Tool Handler** (`tools.ts`): Converts between different tool call formats
+- **Command Loader** (`command-loader.ts`): Manages custom commands
+- **Utilities** (`utils.ts`): Helper functions for streaming and file operations
+
+The system uses an event-driven architecture to handle real-time streaming responses and provides a clean bridge between the ACP and OpenCode protocols.
+
+## Supported Tools
+
+The adapter provides agent tool support for common development tasks:
+
+**File Operations**: Read, write, edit, and multi-edit files with intelligent diff generation and line tracking.
+
+**Terminal Operations**: Execute bash commands, manage background processes, and handle output streaming.
+
+**Search Operations**: Use grep for text search, glob patterns for file finding, and directory listing.
+
+**Web Operations**: Fetch web content and perform web searches.
+
+**Planning Tools**: Manage task lists and handle complex multi-step operations.
+
 ## License
 
-Apache-2.0
+Apache-2.0 - See [LICENSE](LICENSE) for details.
+
+## Links
+
+- [OpenCode](https://github.com/sst/opencode) - The AI coding assistant
+- [Agent Client Protocol](https://agentclientprotocol.com/) - The protocol specification
+- [Zed Editor](https://zed.dev/) - Compatible client
+- [OpenCode SDK](https://opencode.ai/docs/sdk) - Official SDK documentation
